@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import signal
 import sys
 import threading
@@ -16,12 +17,14 @@ from .llm_summarizer import LLMSummarizer, PROVIDER_DEFAULTS, default_base_url
 from .paraformer_asr import ParaformerTranscriber
 from .render import (
     append_note_footer,
+    append_screenshot_section,
     artifact_stem,
     build_note_header,
     format_publish_time,
     friendly_llm_error_message,
     redact_secrets,
 )
+from .screenshots import extract_video_frames_async
 from .settings import (
     ASRSettings,
     LLMSettings,
@@ -70,6 +73,8 @@ class RunOptions:
     from_transcript: Path | None = None
     reuse: bool = True
     clean_media: bool = False
+    screenshots: bool = False
+    screenshot_interval: int = 30
     cookie_file: Path | None = None
 
 
@@ -226,6 +231,22 @@ async def run_video_note_pipeline(
         )
         _check_quality(bundle, options)
 
+        frames: list[Path] = []
+        if options.screenshots:
+            if options.transcript_only:
+                log("仅转录模式不生成笔记，跳过截图")
+            elif resolved.kind in {"subtitle", "transcript"}:
+                log("当前输入没有视频画面，跳过截图")
+            else:
+                frames = await _prepare_screenshots(
+                    resolved,
+                    options,
+                    settings,
+                    video_processor,
+                    cookies,
+                    cancel,
+                )
+
         if options.transcript_only:
             transcript_paths = _write_transcript_output(
                 resolved, bundle, options, stem=None
@@ -234,6 +255,7 @@ async def run_video_note_pipeline(
                 f"转录完成：{len(bundle.segments)} 段，"
                 f"{bundle.quality.get('characters', 0)} 字"
             )
+            _clean_run_cache(resolved, options, settings)
             return RunResult(
                 title=resolved.title,
                 note_path=None,
@@ -251,8 +273,10 @@ async def run_video_note_pipeline(
             settings,
             summarizer,
             cancel,
+            frames,
         )
         log(f"笔记完成：{note_path}")
+        _clean_run_cache(resolved, options, settings)
         return RunResult(
             title=resolved.title,
             note_path=note_path,
@@ -419,8 +443,6 @@ async def _obtain_transcript(
         if cached is not None:
             log(f"复用已有转录：{run_dir / 'transcript.json'}")
             _restore_run_metadata(run_dir, resolved)
-            if options.clean_media:
-                _remove_cached_media(run_dir)
             return cached
 
     if resolved.kind == "url":
@@ -440,8 +462,6 @@ async def _obtain_transcript(
         bundle = _bundle_from_asr(result, resolved.info)
 
     _write_cached_transcript(run_dir, resolved, bundle)
-    if options.clean_media:
-        _remove_cached_media(run_dir)
     return bundle
 
 
@@ -928,6 +948,7 @@ async def _generate_note(
     settings: UserSettings,
     summarizer: LLMSummarizer,
     cancel: Cancellation,
+    frames: Sequence[Path],
 ) -> tuple[Path, dict[str, Path]]:
     output_dir = options.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -985,6 +1006,20 @@ async def _generate_note(
         raise PipelineError("模型返回了空笔记；请更换模型或改用 --transcript-only")
 
     summary = build_note_header(summary, resolved.title, resolved.info)
+    if frames:
+        frames_dir = _unique_frames_directory(
+            output_dir, f"{note_path.stem}.frames"
+        )
+        try:
+            frames_dir.mkdir(parents=True, exist_ok=False)
+            for frame in frames:
+                shutil.copy2(frame, frames_dir / frame.name)
+            summary = append_screenshot_section(
+                summary, frames_dir.name, list(frames)
+            )
+            log(f"截图目录：{frames_dir}（{len(frames)} 张）")
+        except OSError as exc:
+            log(f"截图写入失败，笔记继续：{exc}")
     summary = append_note_footer(
         summary,
         resolved.source_label,
@@ -1003,6 +1038,108 @@ async def _generate_note(
             stem=f"{note_path.stem}.transcript",
         )
     return note_path, transcript_paths
+
+
+async def _prepare_screenshots(
+    resolved: ResolvedInput,
+    options: RunOptions,
+    settings: UserSettings,
+    video_processor: VideoProcessor,
+    cookies: dict[str, str] | None,
+    cancel: Cancellation,
+) -> list[Path]:
+    """Download the preview video (URL) or use the local file, then extract frames."""
+    run_dir = _run_directory(resolved, options, settings)
+    frames_dir = run_dir / f"frames_{options.screenshot_interval}"
+    if options.reuse and (frames_dir / ".complete").is_file():
+        existing = sorted(frames_dir.glob("frame_*.jpg"))
+        if existing:
+            log(f"复用已有截图：{len(existing)} 张")
+            return existing
+
+    try:
+        if resolved.kind == "url":
+            video_path = await _download_preview_video(
+                video_processor,
+                resolved.source,
+                run_dir.name,
+                cookies,
+                cancel,
+            )
+        else:
+            assert resolved.media_path is not None
+            video_path = resolved.media_path
+        cancel.check()
+        log(
+            f"抽帧：每 {options.screenshot_interval} 秒一张"
+            f"（{video_path.name}）"
+        )
+        frames = await extract_video_frames_async(
+            video_path,
+            frames_dir,
+            options.screenshot_interval,
+            cancel.is_set,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log(f"截图失败，笔记仍会继续生成：{redact_secrets(str(exc))}")
+        return []
+
+    if not frames:
+        log("视频里没有可提取的画面，跳过截图")
+        return []
+    log(f"已提取 {len(frames)} 张截图")
+    return frames
+
+
+async def _download_preview_video(
+    video_processor: VideoProcessor,
+    url: str,
+    run_key: str,
+    cookies: dict[str, str] | None,
+    cancel: Cancellation,
+) -> Path:
+    run_dir = runs_root() / run_key
+    cached = _find_cached_media(run_dir, "preview")
+    if cached is not None:
+        log(f"复用已下载预览视频：{cached.name}")
+        return cached
+    log("下载低清预览视频（用于抽帧）")
+    try:
+        return await video_processor.download_preview_video(
+            url,
+            run_key,
+            cookies,
+            should_abort=cancel.is_set,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise PipelineError(
+            f"下载预览视频失败：{redact_secrets(str(exc))}"
+        ) from exc
+
+
+def _unique_frames_directory(output_dir: Path, name: str) -> Path:
+    candidate = output_dir / name
+    index = 2
+    while candidate.exists():
+        candidate = output_dir / f"{name}-{index}"
+        index += 1
+    return candidate
+
+
+def _clean_run_cache(
+    resolved: ResolvedInput, options: RunOptions, settings: UserSettings
+) -> None:
+    if not options.clean_media:
+        return
+    if resolved.kind not in {"url", "local_media"}:
+        return
+    run_dir = _run_directory(resolved, options, settings)
+    if run_dir.is_dir():
+        _remove_cached_media(run_dir)
 
 
 def _find_cached_media(directory: Path, media_name: str) -> Path | None:
@@ -1025,8 +1162,12 @@ def _remove_cached_media(directory: Path) -> None:
             if path.is_file():
                 path.unlink(missing_ok=True)
                 removed += 1
+    for frames_dir in directory.glob("frames_*"):
+        if frames_dir.is_dir():
+            shutil.rmtree(frames_dir)
+            removed += 1
     if removed:
-        log(f"已清理 {removed} 个中间媒体文件（转录仍保留在缓存）")
+        log(f"已清理 {removed} 个中间媒体/截图缓存（转录仍保留在缓存）")
 
 
 def _info_from_segments(
@@ -1127,6 +1268,10 @@ def _validate_options(options: RunOptions, settings: UserSettings) -> None:
     if settings.asr.device not in {"cpu", "cuda"}:
         raise PipelineError(
             f"不支持的转写设备：{settings.asr.device}；可用 cpu / cuda"
+        )
+    if options.screenshots and not 5 <= options.screenshot_interval <= 300:
+        raise PipelineError(
+            f"抽帧间隔必须在 5-300 秒之间，当前为 {options.screenshot_interval}"
         )
     known_models = set(WHISPER_MODEL_REPOS) | {"paraformer-zh"}
     if settings.asr.model not in known_models:

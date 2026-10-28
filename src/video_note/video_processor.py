@@ -818,6 +818,65 @@ class VideoProcessor:
 
         return await asyncio.to_thread(_download)
 
+    async def download_preview_video(
+        self,
+        url: str,
+        task_id: str,
+        cookie: dict[str, str] | None = None,
+        should_abort: Callable[[], bool] | None = None,
+        notes: list[str] | None = None,
+    ) -> Path:
+        """Download a low-resolution video for screenshot extraction."""
+        task_dir = self._task_dir(task_id)
+
+        def _abort_hook(_status: dict[str, Any]) -> None:
+            if should_abort is not None and should_abort():
+                raise asyncio.CancelledError("任务已取消")
+
+        def _download() -> Path:
+            try:
+                extra: dict[str, Any] = {}
+                if should_abort is not None:
+                    extra["progress_hooks"] = [_abort_hook]
+                with self._ydl(
+                    cookie,
+                    cookie_domain=self._cookie_domain_for_url(url),
+                    format="worstvideo[height>=360]/bestvideo[height<=720]/worst",
+                    outtmpl=str(task_dir / "preview.%(ext)s"),
+                    noplaylist=True,
+                    **extra,
+                ) as ydl:
+                    ydl.extract_info(url, download=True)
+                matches = [
+                    item
+                    for item in task_dir.glob("preview.*")
+                    if item.suffix not in {".part", ".ytdl"}
+                ]
+                if matches:
+                    return max(matches, key=lambda item: item.stat().st_size)
+            except Exception as exc:
+                kind = self.detect_source(url)
+                if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
+                    return self._download_bilibili_media_via_api(
+                        url,
+                        task_dir / "preview.m4s",
+                        cookie,
+                        "video",
+                        should_abort,
+                        notes,
+                    )
+                if kind != VideoSource.DOUYIN:
+                    raise
+            if self.detect_source(url) != VideoSource.DOUYIN:
+                raise RuntimeError("yt-dlp completed without producing a preview video")
+            info = self._douyin_media_cache.get(url) or self._extract_douyin_share_info(url, cookie)
+            media_url = info.get("_douyin_video_url")
+            if not media_url:
+                raise RuntimeError("抖音未返回可下载视频地址")
+            return self._download_direct_media(media_url, task_dir / "preview.mp4", url, cookie)
+
+        return await asyncio.to_thread(_download)
+
     def _extract_info(
         self,
         url: str,

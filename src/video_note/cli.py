@@ -140,7 +140,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="完成后删除缓存里的音频，只保留转录",
+        help="完成后删除缓存里的音频和截图缓存，只保留转录",
+    )
+    parser.add_argument(
+        "--screenshots",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="从视频画面抽帧并附在笔记末尾（默认读取配置）",
+    )
+    parser.add_argument(
+        "--screenshot-interval",
+        type=int,
+        metavar="SECONDS",
+        help="抽帧间隔，5-300 秒；指定这一项会启用抽帧（默认读取配置）",
     )
     parser.add_argument(
         "-v",
@@ -201,6 +213,9 @@ def main(argv: list[str] | None = None) -> int:
         settings = load_user_settings(
             Path(args.config).expanduser() if args.config else None
         )
+        screenshots = args.screenshots
+        if screenshots is None and args.screenshot_interval is not None:
+            screenshots = True
         settings = apply_cli_overrides(
             settings,
             provider=args.provider,
@@ -210,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
             asr_model=args.asr,
             device=args.device,
             output_dir=args.out,
+            screenshots=screenshots,
+            screenshot_interval=args.screenshot_interval,
         )
         options = RunOptions(
             input_value=args.input or "",
@@ -227,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             reuse=args.reuse,
             clean_media=args.clean,
+            screenshots=settings.screenshots.enabled,
+            screenshot_interval=settings.screenshots.interval,
             cookie_file=(
                 Path(args.cookie_file).expanduser()
                 if args.cookie_file

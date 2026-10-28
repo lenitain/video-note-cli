@@ -52,11 +52,18 @@ class OutputSettings:
 
 
 @dataclass(frozen=True)
+class ScreenshotSettings:
+    enabled: bool = False
+    interval: int = 30
+
+
+@dataclass(frozen=True)
 class UserSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     asr: ASRSettings = field(default_factory=ASRSettings)
     bilibili: BilibiliSettings = field(default_factory=BilibiliSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
+    screenshots: ScreenshotSettings = field(default_factory=ScreenshotSettings)
 
 
 def user_config_path() -> Path:
@@ -71,6 +78,7 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
     asr = _asr_settings(_section(data, "asr"))
     bilibili = _bilibili_settings(_section(data, "bilibili"))
     output = _output_settings(_section(data, "output"))
+    screenshots = _screenshot_settings(_section(data, "screenshots"))
 
     if provider := _env("VIDEO_NOTE_PROVIDER"):
         llm = replace(llm, provider=provider)
@@ -103,7 +111,23 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
     if output_dir := _env("VIDEO_NOTE_OUTPUT_DIR"):
         output = replace(output, directory=output_dir)
 
-    return UserSettings(llm=llm, asr=asr, bilibili=bilibili, output=output)
+    if screenshots_enabled := _env("VIDEO_NOTE_SCREENSHOTS"):
+        screenshots = replace(
+            screenshots, enabled=_parse_bool(screenshots_enabled)
+        )
+    if screenshot_interval := _env("VIDEO_NOTE_SCREENSHOT_INTERVAL"):
+        screenshots = replace(
+            screenshots,
+            interval=_parse_int(screenshot_interval, screenshots.interval),
+        )
+
+    return UserSettings(
+        llm=llm,
+        asr=asr,
+        bilibili=bilibili,
+        output=output,
+        screenshots=screenshots,
+    )
 
 
 def apply_cli_overrides(
@@ -116,6 +140,8 @@ def apply_cli_overrides(
     asr_model: str | None = None,
     device: str | None = None,
     output_dir: str | None = None,
+    screenshots: bool | None = None,
+    screenshot_interval: int | None = None,
 ) -> UserSettings:
     """Apply explicit command-line values on top of config and environment."""
     llm = replace(
@@ -133,7 +159,26 @@ def apply_cli_overrides(
     output = replace(
         settings.output, directory=output_dir or settings.output.directory
     )
-    return replace(settings, llm=llm, asr=asr, output=output)
+    screenshot_settings = replace(
+        settings.screenshots,
+        enabled=(
+            settings.screenshots.enabled
+            if screenshots is None
+            else screenshots
+        ),
+        interval=(
+            settings.screenshots.interval
+            if screenshot_interval is None
+            else screenshot_interval
+        ),
+    )
+    return replace(
+        settings,
+        llm=llm,
+        asr=asr,
+        output=output,
+        screenshots=screenshot_settings,
+    )
 
 
 def output_directory(settings: UserSettings) -> Path:
@@ -210,6 +255,30 @@ def _output_settings(section: dict[str, Any]) -> OutputSettings:
     return OutputSettings(
         directory=_text(section, "dir", DEFAULT_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR
     )
+
+
+def _screenshot_settings(section: dict[str, Any]) -> ScreenshotSettings:
+    enabled_value = section.get("enabled", False)
+    enabled = (
+        enabled_value
+        if isinstance(enabled_value, bool)
+        else _parse_bool(str(enabled_value))
+    )
+    return ScreenshotSettings(
+        enabled=enabled,
+        interval=_parse_int(section.get("interval", 30), 30),
+    )
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _parse_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _provider_api_key_from_env(provider: str) -> str:

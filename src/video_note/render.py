@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .transcript import format_timestamp
@@ -97,6 +98,23 @@ def summary_style_label(style: str) -> str:
         "faithful": "详细复原（仅视频内容）",
         "concise": "精简摘要",
     }.get(style, style)
+
+
+def append_screenshot_section(
+    summary: str,
+    frames_dir_name: str,
+    frames: list[Path],
+) -> str:
+    """Append a Markdown image gallery that points at sibling frame files."""
+    lines = ["## 视频截图", ""]
+    for index, frame in enumerate(frames, start=1):
+        label = f"截图 {index}"
+        match = re.search(r"_(\d+)s$", frame.stem)
+        if match:
+            label = f"截图 {format_timestamp(int(match.group(1)))}"
+        lines.append(f"![{label}](<./{frames_dir_name}/{frame.name}>)")
+        lines.append("")
+    return summary.rstrip() + "\n\n" + "\n".join(lines).rstrip() + "\n"
 
 
 def append_note_footer(

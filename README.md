@@ -2,7 +2,7 @@
 
 把视频变成带时间轴的 Markdown 笔记的 Linux 命令行工具。自用取向：没有 Web 界面、没有服务端、没有打包，只保留「取字幕 / 本地转写 → 大模型写笔记」这条主链路。
 
-核心代码取自 [VideoToNo](https://github.com/like-attract/video-to-note)（MIT），去掉了 FastAPI、MCP、托盘、扫码登录、截图、HTML/PNG 导出和密钥加密，改成适合终端与脚本调用的形式。
+核心代码取自 [VideoToNo](https://github.com/like-attract/video-to-note)（MIT），去掉了 FastAPI、MCP、托盘、扫码登录、HTML/PNG 导出和密钥加密，改成适合终端与脚本调用的形式。
 
 ## 能做什么
 
@@ -12,10 +12,11 @@
 - B 站：AI 字幕、多分 P 合并、`b23.tv` 短链、视频页 412 时回退开放接口。
 - 笔记：详细 / 忠实复原 / 精简三种风格；长转录按时间顺序分段写完整，不预先压成摘要。
 - 输出：Markdown 笔记，以及带时间轴的 Markdown / JSON / SRT 转录稿。
+- 可选抽帧：URL 下载低清预览视频、本地视频直接用原文件，按间隔抽帧并附在笔记末尾。
 - 复用：同一输入重复运行会复用已缓存的转录；也可以直接从已有转录稿重新生成笔记。
 - 无需 Key：`--transcript-only` 只取字幕/转写，全程不调用大模型。
 
-不包含：Web UI、HTTP API、MCP、任务队列、托盘通知、自动更新、截图、HTML/PNG 导出、扫码登录、密钥加密、打包分发。
+不包含：Web UI、HTTP API、MCP、任务队列、托盘通知、自动更新、HTML/PNG 导出、扫码登录、密钥加密、打包分发。
 
 ## 安装
 
@@ -73,6 +74,10 @@ buvid3 = ""
 
 [output]
 dir = "~/notes/video"
+
+[screenshots]
+enabled = false        # 是否默认抽帧；命令行 --screenshots / --no-screenshots 可覆盖
+interval = 30          # 抽帧间隔（秒），5-300
 ```
 
 环境变量会覆盖配置文件，命令行参数再覆盖环境变量：
@@ -87,6 +92,8 @@ dir = "~/notes/video"
 | `VIDEO_NOTE_ASR_MODEL` | 转写模型 |
 | `VIDEO_NOTE_DEVICE` | `cpu` / `cuda` |
 | `VIDEO_NOTE_OUTPUT_DIR` | 输出目录 |
+| `VIDEO_NOTE_SCREENSHOTS` | `1` / `0`，是否抽帧 |
+| `VIDEO_NOTE_SCREENSHOT_INTERVAL` | 抽帧间隔（秒） |
 | `BILI_SESSDATA` / `BILI_JCT` / `BILI_BUVID3` | B 站 Cookie |
 | `WHISPER_CACHE_DIR` | 模型缓存目录 |
 | `HF_ENDPOINT` | 模型下载源，默认 `https://hf-mirror.com` |
@@ -134,7 +141,13 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --cookie-file ~/cookies.txt
 # 生成笔记时顺便把转录稿也放到输出目录
 video-note 'https://www.bilibili.com/video/BVxxxx' --save-transcript
 
-# 完成后删除缓存里的音频，只保留转录
+# 从视频画面抽帧，每 30 秒一张，附在笔记末尾
+video-note 'https://www.bilibili.com/video/BVxxxx' --screenshots
+
+# 改成每 10 秒一张
+video-note ./lecture.mp4 --screenshots --screenshot-interval 10
+
+# 完成后删除缓存里的音频和截图缓存，只保留转录
 video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 ```
 
@@ -154,8 +167,10 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `--device cpu\|cuda` | 转写设备 |
 | `--provider/--base-url/--model/--api-key` | 临时覆盖模型配置 |
 | `--cookie-file FILE` | Netscape 格式 cookies.txt |
+| `--screenshots / --no-screenshots` | 是否抽帧并附在笔记末尾 |
+| `--screenshot-interval SECONDS` | 抽帧间隔，5-300 秒，默认 30；指定即启用抽帧 |
 | `--reuse / --no-reuse` | 复用已有转录，默认开启 |
-| `--clean` | 完成后清理缓存音频 |
+| `--clean` | 完成后清理缓存音频、预览视频和截图缓存 |
 | `--config FILE` | 指定配置文件 |
 | `-v, --verbose` | 失败时打印完整堆栈 |
 
@@ -165,12 +180,15 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 
 - 笔记：`<标题>.md`
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
+- 截图：`<标题>.frames/frame_0001_30s.jpg`，笔记末尾以相对路径引用
 - B 站分 P：`<标题>-P1,3.md`（转录稿同理）
 - 重名时自动加 `-2`、`-3`
 
 缓存在 `~/.cache/video-note/`：
 
 - `runs/<hash>/audio.*`：下载的音频
+- `runs/<hash>/preview.*`：抽帧用的低清预览视频
+- `runs/<hash>/frames_<间隔>/`：可复用的截图缓存
 - `runs/<hash>/transcript.json`：可复用的转录
 - `models/`：faster-whisper / paraformer 模型
 
@@ -179,6 +197,20 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 ```bash
 rm -rf ~/.cache/video-note/runs
 ```
+
+## 视频截图
+
+开启后（配置 `[screenshots] enabled = true`，或命令行 `--screenshots`）：
+
+- URL：额外下载一份低清预览视频，不下载完整高清视频
+- 本地视频：直接从本地文件抽帧
+- 按 `interval` 秒抽一帧，存到输出目录的 `<标题>.frames/`；本地大分辨率视频会缩到最大宽度 1280
+- 笔记末尾追加 `## 视频截图`，用相对路径引用图片，例如 `![截图 00:30](<./标题.frames/frame_0001_30s.jpg>)`
+- 字幕文件 / `--from-transcript` 输入没有视频画面，会跳过抽帧
+- `--transcript-only` 只输出转录，也会跳过抽帧
+- `--clean` 会清理缓存里的预览视频和截图缓存，但输出目录里已经发布的 `.frames/` 会保留
+
+截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新抽帧；换间隔会按新间隔重新抽。`--no-reuse` 可强制重跑。截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
 
 ## B 站 AI 字幕
 
@@ -249,6 +281,14 @@ video-note 'URL' --transcript-only
 # 然后让 agent/自己读 transcript.md（或 json）整理
 ```
 
+**截图没有生成**
+
+- `--transcript-only` 只输出转录，不会抽帧
+- 字幕文件 / `--from-transcript` 没有视频画面，不会抽帧
+- 检查配置 `[screenshots] enabled`，或显式加 `--screenshots`
+- 抽帧间隔必须在 5-300 秒之间
+- 预览视频下载失败时日志会说明，笔记仍会正常生成；可以稍后重试或改用本地视频
+
 **抖音**
 
 只保留 `yt-dlp` / 公开分享页解析。需要浏览器登录验证的抖音链接不支持；需要时请先用其他工具下载成本地文件再跑。
@@ -270,7 +310,8 @@ src/video_note/
   settings.py          TOML/环境变量配置
   bili_cookies.py      cookies.txt 读取
   transcript_files.py  转录稿读写（JSON/Markdown/SRT）
-  render.py            笔记头尾、文件名、错误文案
+  render.py            笔记头尾、截图区块、文件名、错误文案
+  screenshots.py       PyAV 抽帧与 JPEG 输出
   transcript.py        时间轴、切块、质量检查（上游代码）
   video_processor.py   下载、平台字幕、B 站 AI 字幕（上游代码）
   whisper_asr.py       faster-whisper 转写（上游代码）

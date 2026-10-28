@@ -31,3 +31,9 @@ buvid3 = ""
 [output]
 # 笔记和转录稿的保存目录；VIDEO_NOTE_OUTPUT_DIR 和 --out 会覆盖这里。
 dir = "~/notes/video"
+
+[screenshots]
+# 是否从视频画面抽帧并附在笔记末尾；命令行 --screenshots / --no-screenshots 可覆盖。
+enabled = false
+# 抽帧间隔（秒），5-300。
+interval = 30

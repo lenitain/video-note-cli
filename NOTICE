@@ -5,5 +5,5 @@ This project contains code derived from VideoToNo:
     MIT License
 
 The derived modules are transcript.py, download.py, whisper_asr.py,
-paraformer_asr.py, video_processor.py, and llm_summarizer.py under
-src/video_note/. See LICENSE for the full MIT text.
+paraformer_asr.py, video_processor.py, llm_summarizer.py, and the frame
+extraction logic in screenshots.py under src/video_note/. See LICENSE for the full MIT text.

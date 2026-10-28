@@ -11,6 +11,7 @@ dependencies = [
     "openai>=1.68,<3",
     "numpy>=1.26",
     "av>=13,<17",
+    "Pillow>=10,<13",
 ]
 
 [project.scripts]
