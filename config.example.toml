@@ -8,11 +8,14 @@ provider = "deepseek"
 base_url = ""
 model = ""
 # Plain text on purpose: this is a personal, local-only setup.
+# Can be left empty and supplied via VIDEO_NOTE_API_KEY or a provider variable
+# such as DEEPSEEK_API_KEY / OPENAI_API_KEY.
 api_key = ""
 
 [asr]
+# base = faster-whisper 的基础多语言模型（模型约 75MB，速度较快，准确率一般）
 # faster-whisper: tiny / base / small / medium / large-v3 / turbo / belle-turbo-zh
-# Chinese CPU-friendly: paraformer-zh
+# 中文更推荐 paraformer-zh（CPU 快）或 small / belle-turbo-zh（更准）
 model = "base"
 # cpu / cuda
 device = "cpu"
@@ -26,5 +29,5 @@ bili_jct = ""
 buvid3 = ""
 
 [output]
-# Supports ~ and environment-independent paths.
+# 笔记和转录稿的保存目录；VIDEO_NOTE_OUTPUT_DIR 和 --out 会覆盖这里。
 dir = "~/notes/video"

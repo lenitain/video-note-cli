@@ -9,6 +9,18 @@ from typing import Any
 APP_NAME = "video-note"
 DEFAULT_OUTPUT_DIR = "~/notes/video"
 
+# Common provider-specific environment variables. They are used only when
+# api_key is empty in config.toml; VIDEO_NOTE_API_KEY always wins.
+PROVIDER_API_KEY_ENV = {
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "openai_gpt4": ("OPENAI_API_KEY",),
+    "openai_gpt35": ("OPENAI_API_KEY",),
+    "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+    "glm": ("ZHIPUAI_API_KEY", "GLM_API_KEY"),
+    "moonshot": ("MOONSHOT_API_KEY", "KIMI_API_KEY"),
+}
+
 
 @dataclass(frozen=True)
 class LLMSettings:
@@ -68,6 +80,10 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
         llm = replace(llm, model=model)
     if api_key := _env("VIDEO_NOTE_API_KEY"):
         llm = replace(llm, api_key=api_key)
+    elif not llm.api_key:
+        provider_key = _provider_api_key_from_env(llm.provider)
+        if provider_key:
+            llm = replace(llm, api_key=provider_key)
 
     if model := _env("VIDEO_NOTE_ASR_MODEL"):
         asr = replace(asr, model=model)
@@ -194,6 +210,14 @@ def _output_settings(section: dict[str, Any]) -> OutputSettings:
     return OutputSettings(
         directory=_text(section, "dir", DEFAULT_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR
     )
+
+
+def _provider_api_key_from_env(provider: str) -> str:
+    for name in PROVIDER_API_KEY_ENV.get(provider.strip().lower(), ()):
+        value = _env(name)
+        if value:
+            return value
+    return ""
 
 
 def _env(name: str) -> str:

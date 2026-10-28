@@ -82,7 +82,8 @@ dir = "~/notes/video"
 | `VIDEO_NOTE_PROVIDER` | `provider` |
 | `VIDEO_NOTE_BASE_URL` | `base_url` |
 | `VIDEO_NOTE_MODEL` | `model` |
-| `VIDEO_NOTE_API_KEY` | `api_key` |
+| `VIDEO_NOTE_API_KEY` | `api_key`（优先级最高，覆盖配置文件） |
+| `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` / `ZHIPUAI_API_KEY` / `MOONSHOT_API_KEY` | 对应 provider 的常用 Key 变量；仅在配置文件 `api_key` 为空时使用 |
 | `VIDEO_NOTE_ASR_MODEL` | 转写模型 |
 | `VIDEO_NOTE_DEVICE` | `cpu` / `cuda` |
 | `VIDEO_NOTE_OUTPUT_DIR` | 输出目录 |
@@ -93,8 +94,18 @@ dir = "~/notes/video"
 不写配置文件也能用环境变量临时跑，例如：
 
 ```bash
+# 通用变量，优先级最高
 VIDEO_NOTE_API_KEY=sk-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
+
+# DeepSeek 也可以用它的惯用变量名；配置文件里 api_key 留空即可
+DEEPSEEK_API_KEY=sk-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
+
+# 输出目录也可以在配置文件里改，或用环境变量/命令行临时覆盖
+VIDEO_NOTE_OUTPUT_DIR=/data/notes video-note 'https://www.bilibili.com/video/BVxxxx'
+video-note 'https://www.bilibili.com/video/BVxxxx' --out /data/notes
 ```
+
+优先级从低到高：内置默认值 → `~/.config/video-note/config.toml` → 环境变量 → 命令行参数。
 
 ## 用法
 
@@ -150,7 +161,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 
 ## 输出
 
-默认写到 `~/notes/video`：
+默认写到 `~/notes/video`，可在配置文件的 `[output] dir` 修改，也可以用 `VIDEO_NOTE_OUTPUT_DIR` 或 `--out` 临时覆盖：
 
 - 笔记：`<标题>.md`
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
@@ -183,11 +194,18 @@ rm -rf ~/.cache/video-note/runs
 
 ## 转写模型
 
+`base` 不是“基础功能”，而是 **faster-whisper 的模型档位名**：它大约 74M 参数、模型文件约 75MB，多语言，速度较快，准确率中等。默认用它是因为下载小、CPU 能跑；中文识别质量一般，想要更准可以换更大的档位。
+
 | 模型 | 说明 |
 |---|---|
-| `tiny` / `base` / `small` / `medium` / `large-v3` | faster-whisper，多语言；`base` 为默认，`small` 质量更好但更慢 |
-| `turbo` / `belle-turbo-zh` | 更快的 Whisper 变体；`belle-turbo-zh` 偏中文 |
-| `paraformer-zh` | sherpa-onnx Paraformer，仅中文，CPU 上通常明显快于 Whisper |
+| `tiny` | 最小最快，准确率最低；适合先快速看一遍 |
+| `base` | 默认；约 75MB，速度和准确率折中 |
+| `small` | 约 500MB，中文准确率明显好于 `base`，CPU 上更慢 |
+| `medium` / `large-v3` | 更准、更慢、模型更大；CPU 上可能需要较长等待 |
+| `turbo` / `belle-turbo-zh` | Whisper 的加速/中文微调变体；`belle-turbo-zh` 偏中文 |
+| `paraformer-zh` | sherpa-onnx Paraformer，仅中文，CPU 上通常明显快于 Whisper；中文视频首选 |
+
+模型档位可以在配置文件的 `[asr] model` 固定，也可以每次用 `--asr` 覆盖。首次使用会下载到 `~/.cache/video-note/models`。
 
 首次使用会下载模型到 `~/.cache/video-note/models`。默认走 `hf-mirror.com`；网络环境不同可以：
 
