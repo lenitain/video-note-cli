@@ -1,0 +1,24 @@
+[project]
+name = "video-note-cli"
+version = "0.1.0"
+description = "Turn videos into timestamped Markdown notes from the Linux command line"
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp>=2025.1.1",
+    "faster-whisper>=1.2,<2",
+    "sherpa-onnx>=1.13,<2",
+    "sherpa-onnx-core>=1.13,<2",
+    "openai>=1.68,<3",
+    "numpy>=1.26",
+    "av>=13,<17",
+]
+
+[project.scripts]
+video-note = "video_note.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_note"]

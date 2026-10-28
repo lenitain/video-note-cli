@@ -1,0 +1,30 @@
+# video-note config. The installed copy lives at ~/.config/video-note/config.toml.
+# Environment variables override this file; CLI flags override both.
+
+[llm]
+# deepseek / openai / openai_gpt4 / openai_gpt35 / qwen / glm / moonshot / custom
+provider = "deepseek"
+# Only needed for custom; leave empty for built-in providers.
+base_url = ""
+model = ""
+# Plain text on purpose: this is a personal, local-only setup.
+api_key = ""
+
+[asr]
+# faster-whisper: tiny / base / small / medium / large-v3 / turbo / belle-turbo-zh
+# Chinese CPU-friendly: paraformer-zh
+model = "base"
+# cpu / cuda
+device = "cpu"
+
+[bilibili]
+# Needed for Bilibili AI subtitles. Public subtitles work without these.
+# Export a Netscape cookies.txt from your browser and pass --cookie-file,
+# or fill these values directly.
+sessdata = ""
+bili_jct = ""
+buvid3 = ""
+
+[output]
+# Supports ~ and environment-independent paths.
+dir = "~/notes/video"

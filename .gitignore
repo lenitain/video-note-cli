@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local secrets and generated notes
+config.toml
+.cache/
+notes/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
