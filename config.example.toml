@@ -13,7 +13,7 @@ model = ""
 api_key = ""
 
 [asr]
-# base = faster-whisper 的基础多语言模型（模型约 75MB，速度较快，准确率一般）
+# base = faster-whisper 的基础多语言模型（模型约 140MB，速度较快，准确率一般）
 # faster-whisper: tiny / base / small / medium / large-v3 / turbo / belle-turbo-zh
 # 中文更推荐 paraformer-zh（CPU 快）或 small / belle-turbo-zh（更准）
 model = "base"

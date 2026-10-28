@@ -194,13 +194,13 @@ rm -rf ~/.cache/video-note/runs
 
 ## 转写模型
 
-`base` 不是“基础功能”，而是 **faster-whisper 的模型档位名**：它大约 74M 参数、模型文件约 75MB，多语言，速度较快，准确率中等。默认用它是因为下载小、CPU 能跑；中文识别质量一般，想要更准可以换更大的档位。
+`base` 不是“基础功能”，而是 **faster-whisper 的模型档位名**：它大约 74M 参数、模型文件约 140MB，多语言，速度较快，准确率中等。默认用它是因为下载小、CPU 能跑；中文识别质量一般，想要更准可以换更大的档位。
 
 | 模型 | 说明 |
 |---|---|
 | `tiny` | 最小最快，准确率最低；适合先快速看一遍 |
-| `base` | 默认；约 75MB，速度和准确率折中 |
-| `small` | 约 500MB，中文准确率明显好于 `base`，CPU 上更慢 |
+| `base` | 默认；约 140MB，速度和准确率折中 |
+| `small` | 约 460MB，中文准确率明显好于 `base`，CPU 上更慢 |
 | `medium` / `large-v3` | 更准、更慢、模型更大；CPU 上可能需要较长等待 |
 | `turbo` / `belle-turbo-zh` | Whisper 的加速/中文微调变体；`belle-turbo-zh` 偏中文 |
 | `paraformer-zh` | sherpa-onnx Paraformer，仅中文，CPU 上通常明显快于 Whisper；中文视频首选 |
