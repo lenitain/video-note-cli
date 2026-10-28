@@ -199,11 +199,13 @@ def _load_timestamped_text(path: Path) -> LoadedTranscript:
     except OSError as exc:
         raise ValueError(f"无法读取转录 {path}：{exc}") from exc
 
-    title = path.stem
+    title = path.stem.removesuffix(".transcript")
     segments: list[TranscriptSegment] = []
     for line in lines:
         if not segments and (heading := _HEADING_TITLE_RE.match(line.strip())):
-            title = heading.group("title")
+            candidate = heading.group("title")
+            if candidate != "带时间戳转录":
+                title = candidate
             continue
         match = _TIMESTAMPED_LINE_RE.match(line.strip())
         if not match:
