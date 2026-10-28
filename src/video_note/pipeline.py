@@ -71,7 +71,6 @@ class RunOptions:
     reuse: bool = True
     clean_media: bool = False
     cookie_file: Path | None = None
-    verbose: bool = False
 
 
 @dataclass

@@ -232,7 +232,6 @@ def main(argv: list[str] | None = None) -> int:
                 if args.cookie_file
                 else None
             ),
-            verbose=args.verbose,
         )
         cancel.install()
         result = asyncio.run(

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -121,13 +122,14 @@ class ParaformerTranscriber:
         directory = self._component_dir(component)
         directory.mkdir(parents=True, exist_ok=True)
         last_error: Exception | None = None
+        endpoint = os.environ.get("HF_ENDPOINT", HF_ENDPOINT).rstrip("/")
         for filename in spec["files"]:
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError("任务已取消")
             target = directory / filename
             if self._file_complete(target):
                 continue
-            url = f"{HF_ENDPOINT}/{spec['repo']}/resolve/main/{filename}"
+            url = f"{endpoint}/{spec['repo']}/resolve/main/{filename}"
             ok, error = download_to_file(url, target, HEADERS, cancel_event)
             if not ok:
                 last_error = error
@@ -136,7 +138,7 @@ class ParaformerTranscriber:
         ):
             raise RuntimeError(
                 f"Paraformer {component} 模型下载失败：{last_error}。"
-                f"默认走 hf-mirror.com 镜像，请检查网络/代理或通过 HF_ENDPOINT 指定可用镜像。"
+                f"当前下载源 {endpoint}，请检查网络/代理或通过 HF_ENDPOINT 指定可用镜像。"
             )
         return directory
 
