@@ -17,6 +17,12 @@ from .transcript import (
     merge_segment_lines,
     segments_to_prompt,
 )
+from .video_frames import (
+    VideoFrame,
+    evenly_sample_frames,
+    frame_data_url,
+    frames_in_span,
+)
 
 
 PROVIDER_DEFAULTS = {
@@ -67,6 +73,12 @@ def normalize_endpoint_host(base_url: str, model_type: str = "") -> str:
     return f"{host}{path}"
 
 SUMMARY_CHUNK_CHARACTERS = 9_000
+# 单次请求附带的画面上限。图片是输入 token，按时间段分给各段正文后仍可能偏多；
+# 均匀抽稀到该数量，既保留首尾画面，又不会把上下文与账单一起抬上去。
+MAX_FRAMES_PER_REQUEST = 16
+# 提示词允许模型在正文里插几张图：给多少画面由代码决定，插哪几张由模型按内容取舍。
+MAX_INLINE_FRAMES_PER_SECTION = 4
+MAX_INLINE_FRAMES_PER_DRAFT = 6
 MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
@@ -161,6 +173,28 @@ SECTION_RATE_LIMIT_BACKOFF_SECONDS = 20.0
 _RATE_LIMIT_RE = re.compile(
     r"429|rate.?limit|too many requests|insufficient_quota|out of quota", re.IGNORECASE
 )
+# 模型不接受图片输入时的报错特征（provider 写法各异，只作提示语判定，不参与重试）。
+_VISION_REJECTION_HINTS = (
+    "image",
+    "vision",
+    "multimodal",
+    "image_url",
+    "content type",
+    "图像",
+    "图片",
+)
+_VISION_REJECTION_PHRASES = (
+    "unsupported",
+    "not supported",
+    "does not support",
+    "invalid",
+    "not accept",
+    "text-only",
+    "only text",
+    "unknown variant",
+    "不支持",
+    "不受支持",
+)
 # 兜底小节的标题字样（测试与核对脚本按它区分「整理过的正文」和「内嵌的原文」）。
 RAW_FALLBACK_HEADING = "### 未能整理的原文"
 # 各段标题写完之后，概览文本的一次小请求额度。
@@ -186,6 +220,10 @@ _HEADING_TIMESTAMP_RE = re.compile(
 # 不动正文里正常的破折号。
 _TIMESTAMP_DASH_RE = re.compile(
     r"(\d{1,3}:\d{2}(?::\d{2})?)\s*[–—―−]\s*(\d{1,3}:\d{2}(?::\d{2})?)"
+)
+# 部分模型（MiniMax 等）把思考链直接写进正文的 <think>…</think>，不剥掉就会混进笔记。
+_INLINE_THINKING_RE = re.compile(
+    r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?\s*>", re.IGNORECASE | re.S
 )
 # 模型常把公式写成 \(...\) / \[...\]，而多数 Markdown 渲染器只认 $...$ / $$...$$。
 # 成稿收尾时统一归一；代码块内是字面文本，跳过不改。
@@ -218,6 +256,14 @@ MAX_PARAM_RETRIES = 2
 def _looks_rate_limited(exc: BaseException) -> bool:
     """这次失败是否像限流/配额（决定逐段直写重试前要不要先等一会）。"""
     return bool(_RATE_LIMIT_RE.search(f"{type(exc).__name__}: {exc}"))
+
+
+def looks_like_vision_rejection(exc: BaseException) -> bool:
+    """报错是否在拒绝图片输入（说明当前模型只能处理文字）。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _VISION_REJECTION_HINTS) and any(
+        phrase in text for phrase in _VISION_REJECTION_PHRASES
+    )
 
 
 def _looks_disconnected(exc: BaseException) -> bool:
@@ -352,6 +398,8 @@ class LLMSummarizer:
         self.base_url = base_url or ""
         self.model = model
         self.warnings: list[str] = []
+        # 编码后的截图 data URL：同一次运行里重试、续写会把同一批图再发一次。
+        self._frame_urls: dict[str, str] = {}
         # rejected_params（该配置已被拒的思考参数）由同名属性从全局缓存按需读取，
         # 同进程内后续任务不会再重复踩同一个 400
 
@@ -488,6 +536,7 @@ class LLMSummarizer:
         reasoning_effort: str = "auto",
         progress_callback: ProgressCallback | None = None,
         should_abort: Callable[[], bool] | None = None,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         if not segments:
             raise ValueError("Cannot summarize an empty transcript")
@@ -513,6 +562,7 @@ class LLMSummarizer:
                 reasoning_effort,
                 progress_callback,
                 should_abort,
+                frames,
             )
         else:
             draft = await self._write_condensed_notes(
@@ -524,6 +574,7 @@ class LLMSummarizer:
                 reasoning_effort,
                 progress_callback,
                 should_abort,
+                frames,
             )
         await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
@@ -577,6 +628,7 @@ class LLMSummarizer:
         reasoning_effort: str,
         progress_callback: ProgressCallback | None,
         should_abort: Callable[[], bool] | None,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         """原有管线：逐段压缩成片段笔记 → 分层归并 → 一次成稿。
 
@@ -653,14 +705,18 @@ class LLMSummarizer:
         draft_progress = 78
         draft_stage = "正在生成完整笔记"
         await self._report_progress(progress_callback, draft_progress, draft_stage)
+        draft_frames = evenly_sample_frames(frames, MAX_FRAMES_PER_REQUEST)
         draft = await self._complete(
-            self._note_prompt(title, source, metadata, style, coverage_end),
+            self._note_prompt(
+                title, source, metadata, style, coverage_end, draft_frames
+            ),
             max_tokens=max_tokens,
             effort=notes_effort,
             progress_callback=progress_callback,
             progress=draft_progress,
             stage=draft_stage,
             should_abort=should_abort,
+            frames=draft_frames,
         )
         return await self._ensure_tail_coverage(
             title,
@@ -699,6 +755,7 @@ class LLMSummarizer:
         reasoning_effort: str,
         progress_callback: ProgressCallback | None,
         should_abort: Callable[[], bool] | None,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         """长转录管线：切块 → 并发把每块直接写成终稿 → 机械拼接 → 目录与概览。
 
@@ -739,17 +796,23 @@ class LLMSummarizer:
         async def worker(index: int) -> None:
             nonlocal done
             async with semaphore:
+                section = sections[index]
+                section_frames = evenly_sample_frames(
+                    frames_in_span(frames, section[0].start, section[-1].end),
+                    MAX_FRAMES_PER_REQUEST,
+                )
                 results[index] = await self._write_one_section(
                     title,
                     index + 1,
                     total,
-                    sections[index],
+                    section,
                     self._context_tail(sections, index),
                     effort,
                     mechanical_effort,
                     report,
                     should_abort,
                     brief,
+                    section_frames,
                 )
             done += 1
             await report(
@@ -788,6 +851,7 @@ class LLMSummarizer:
         report: Callable[[int, str], Awaitable[None]],
         should_abort: Callable[[], bool] | None,
         brief: str = "",
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         """把一段转录直接写成终稿笔记，并保证它推进到自己那段的时间末尾。
 
@@ -823,12 +887,14 @@ class LLMSummarizer:
                         context_tail,
                         brief=brief,
                         retried=attempt > 0,
+                        frames=frames,
                     ),
                     max_tokens=max_tokens,
                     effort=effort,
                     progress_callback=report,
                     stage=stage,
                     should_abort=should_abort,
+                    frames=frames,
                 )
                 try:
                     text = await self._continue_section(
@@ -841,6 +907,7 @@ class LLMSummarizer:
                         report,
                         stage,
                         should_abort,
+                        frames,
                     )
                 except Exception as exc:
                     # 续写失败不推翻首写：这一段已经写出来的部分照样要留在笔记里
@@ -877,6 +944,7 @@ class LLMSummarizer:
         report: Callable[[int, str], Awaitable[None]],
         stage: str,
         should_abort: Callable[[], bool] | None,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         """本段没写到自己区间末尾时接着写，最多 ``SECTION_CONTINUATION_MAX`` 次。
 
@@ -897,6 +965,10 @@ class LLMSummarizer:
             remaining = [segment for segment in section if segment.end > covered + 0.5]
             if not remaining:
                 return text
+            remaining_frames = evenly_sample_frames(
+                frames_in_span(frames, covered, section[-1].end),
+                MAX_FRAMES_PER_REQUEST,
+            )
             patch = await self._complete(
                 self._section_continuation_prompt(
                     title,
@@ -906,12 +978,14 @@ class LLMSummarizer:
                     remaining,
                     format_timestamp(covered),
                     format_timestamp(section[-1].end),
+                    remaining_frames,
                 ),
                 max_tokens=self._section_max_tokens(remaining),
                 effort=effort,
                 progress_callback=report,
                 stage=f"{stage}续写",
                 should_abort=should_abort,
+                frames=remaining_frames,
             )
             if not patch.strip():
                 return text
@@ -1056,6 +1130,28 @@ class LLMSummarizer:
         )
 
     @staticmethod
+    def _frames_prompt_block(
+        frames: Sequence[VideoFrame], max_inline: int
+    ) -> str:
+        """画面清单与插图规则；没有截图时返回空串，提示词保持原样。"""
+        if not frames:
+            return ""
+        listing = "\n".join(
+            f"图片 {frame.frame_id}｜{frame.timestamp}" for frame in frames
+        )
+        return f"""
+视频画面（共 {len(frames)} 张，按清单顺序附在下面，每张图前标注了编号与时间点）：
+{listing}
+
+插图要求：
+- 只在画面本身承载信息时插图：幻灯片、板书、图表、公式、代码、软件操作、实物演示；主讲人出镜、空镜、转场、纯装饰画面一律不插
+- 插图写在对应内容之后，单独一行，写成 [[图片 编号：画面说明]]，例如 [[图片 0003：用双指针扫描已排序数组]]
+- 编号只能取自上面的清单，同一张图只插一次，这段笔记最多插 {max_inline} 张
+- 画面说明只写画面里看得见的事实（标题、坐标轴、代码作用、演示结果），不超过 30 字，不写“如图所示”，不做推测
+- 一张都不值得插时就不要写这种标记；不要输出图片路径或 ![](...) 语法，程序会把标记换成真正的图片
+"""
+
+    @staticmethod
     def _section_note_prompt(
         title: str,
         index: int,
@@ -1064,6 +1160,7 @@ class LLMSummarizer:
         context_tail: str,
         brief: str = "",
         retried: bool = False,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         start = format_timestamp(section[0].start)
         end = format_timestamp(section[-1].end)
@@ -1078,6 +1175,9 @@ class LLMSummarizer:
             else ""
         )
         brief_block = f"\n{brief}\n" if brief else ""
+        frames_block = LLMSummarizer._frames_prompt_block(
+            frames, MAX_INLINE_FRAMES_PER_SECTION
+        )
         return f"""视频标题：{title}
 这是全片第 {index}/{total} 段，覆盖时间轴 {start} – {end}。直接把这一段写成最终成稿的笔记正文：不要写提纲、不要预告后文、不要总结全片。
 {brief_block}
@@ -1090,7 +1190,7 @@ class LLMSummarizer:
 - 用 ## 组织小节、### 组织子话题；不要输出 # 开头的文档标题，也不要输出视频元信息
 - 数学公式一律写成 Markdown 公式：行内用 $...$，独立公式块用 $$...$$，不要用 \\(...\\) 或 \\[...\\] 包裹
 - 忠实于讲者本意，允许结合上下文修正明显的口误与转写错误；不补充外部知识，不做评价
-{context}
+{frames_block}{context}
 本段转录：
 {segments_to_prompt(section)}"""
 
@@ -1103,7 +1203,11 @@ class LLMSummarizer:
         remaining: Sequence[TranscriptSegment],
         covered_ts: str,
         end: str,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
+        frames_block = LLMSummarizer._frames_prompt_block(
+            frames, MAX_INLINE_FRAMES_PER_SECTION
+        )
         return f"""视频《{title}》笔记第 {index}/{total} 段（覆盖到 {end}）已经写到 {covered_ts}，后半部分还没写完。
 
 请接着已有结尾往下写，只输出剩余内容：
@@ -1111,7 +1215,7 @@ class LLMSummarizer:
 - 时间戳格式与已有结尾保持一致，一直写到 {end} 为止
 - 数学公式与已有笔记保持一致，用 Markdown 公式：行内 $...$、独立公式块 $$...$$
 - 忠实转录内容，不补充外部知识，不做评价
-
+{frames_block}
 已有结尾（仅供衔接参考）：
 {text[-NOTE_TAIL_CHARACTERS:]}
 
@@ -1440,14 +1544,47 @@ class LLMSummarizer:
             "openai",
         }
 
+    def _frame_data_url(self, frame: VideoFrame) -> str:
+        """按路径缓存截图编码结果，避免重试与续写反复压缩同一批图片。"""
+        key = str(frame.path)
+        cached = self._frame_urls.get(key)
+        if cached is None:
+            cached = frame_data_url(frame)
+            self._frame_urls[key] = cached
+        return cached
+
     def _build_request(
-        self, prompt: str, max_tokens: int, effort: str, budget: str = "auto"
+        self,
+        prompt: str,
+        max_tokens: int,
+        effort: str,
+        budget: str = "auto",
+        frames: Sequence[VideoFrame] = (),
     ) -> dict[str, Any]:
         """budget: auto（思考档抬高输出预算）/ requested（只用调用方额度）/ omit（不下发）。
 
         思考链计入输出 token，所以默认要给足额度；但第三方网关的上限常常比官方低
         （拒绝时一般报 param=max_tokens），因此留出两级降级，不让任务卡在参数上。
+
+        带截图时把 user 消息改成内容数组：先放完整提示词，再按清单顺序逐张放
+        “编号｜时间点”文字与图片，让模型能把提示词里的编号对应到具体画面。
         """
+        content: Any = prompt
+        if frames:
+            content = [{"type": "text", "text": prompt}]
+            for frame in frames:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"图片 {frame.frame_id}｜{frame.timestamp}",
+                    }
+                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": self._frame_data_url(frame)},
+                    }
+                )
         request: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -1458,7 +1595,7 @@ class LLMSummarizer:
                         "保守修正明显的口误、笔误和语音转写错误。"
                     ),
                 },
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": content},
             ],
         }
         token_key = (
@@ -1495,11 +1632,12 @@ class LLMSummarizer:
         param_attempts: int = MAX_PARAM_RETRIES,
         budget: str = "auto",
         connection_retries: int = 1,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         if should_abort is not None and should_abort():
             raise asyncio.CancelledError("任务已取消")
 
-        request = self._build_request(prompt, max_tokens, effort, budget)
+        request = self._build_request(prompt, max_tokens, effort, budget, frames)
         try:
             # 流式建连：既能逐块读取，也能在取消时立即中止本次请求
             stream = await self.client.chat.completions.create(**request, stream=True)
@@ -1523,6 +1661,7 @@ class LLMSummarizer:
                 should_abort=should_abort,
                 param_attempts=param_attempts - 1,
                 budget=budget,
+                frames=frames,
             )
 
         parts: list[str] = []
@@ -1588,6 +1727,7 @@ class LLMSummarizer:
                     param_attempts=param_attempts,
                     budget=budget,
                     connection_retries=connection_retries - 1,
+                    frames=frames,
                 )
             raise
         finally:
@@ -1597,7 +1737,7 @@ class LLMSummarizer:
                 if inspect.isawaitable(closed):
                     await closed
 
-        content = "".join(parts)
+        content = _INLINE_THINKING_RE.sub("", "".join(parts))
         # 把"我们下发了什么"与"通道实际给了什么"并排记下来：静默忽略关思考请求、或把
         # max_tokens 悄悄砍小，都不会回 400，参数降级阶梯因此永远不触发，光看
         # finish_reason=length 猜不到额度是谁缩的。
@@ -1640,6 +1780,7 @@ class LLMSummarizer:
                     should_abort=should_abort,
                     param_attempts=param_attempts,
                     budget=budget,
+                    frames=frames,
                 )
             # 已经关过思考却仍只收到思考 ⇒ 这条通道不认我们的关闭请求，再劝"关闭深度
             # 思考"就是把人往死胡同里带（1.4.2 群测实测：off 档下发后仍累计 6473 字
@@ -1889,6 +2030,7 @@ class LLMSummarizer:
         metadata: dict[str, Any],
         style: str = "detailed",
         coverage_end: str | None = None,
+        frames: Sequence[VideoFrame] = (),
     ) -> str:
         owner = metadata.get("owner") or "未知"
         published_at = metadata.get("published_at") or "未知"
@@ -1926,6 +2068,9 @@ class LLMSummarizer:
         )
         brief = LLMSummarizer._context_brief(metadata)
         brief_block = f"\n{brief}\n" if brief else ""
+        frames_block = LLMSummarizer._frames_prompt_block(
+            frames, MAX_INLINE_FRAMES_PER_DRAFT
+        )
         return f"""{task}
 
 视频标题：{title}
@@ -1941,7 +2086,7 @@ class LLMSummarizer:
 Markdown 脚注集中说明。不要在正文反复插入“原文如此”或“疑为转写错误”。
 结构按内容自然组织，不必凑固定模板。数学公式一律用 Markdown 公式书写：行内 $...$、独立
 公式块 $$...$$，不要用 \\(...\\) 或 \\[...\\] 包裹。标题使用：# 视频笔记：《{title}》
-
+{frames_block}
 材料：
 {source}"""
 

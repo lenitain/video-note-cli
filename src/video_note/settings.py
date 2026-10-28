@@ -53,7 +53,7 @@ class OutputSettings:
 
 @dataclass(frozen=True)
 class ScreenshotSettings:
-    enabled: bool = False
+    enabled: bool = True
     interval: int = 30
 
 
@@ -258,7 +258,7 @@ def _output_settings(section: dict[str, Any]) -> OutputSettings:
 
 
 def _screenshot_settings(section: dict[str, Any]) -> ScreenshotSettings:
-    enabled_value = section.get("enabled", False)
+    enabled_value = section.get("enabled", True)
     enabled = (
         enabled_value
         if isinstance(enabled_value, bool)

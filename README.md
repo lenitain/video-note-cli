@@ -1,6 +1,6 @@
 # video-note-cli
 
-把视频变成带时间轴的 Markdown 笔记的 Linux 命令行工具。自用取向：没有 Web 界面、没有服务端、没有打包，只保留「取字幕 / 本地转写 → 大模型写笔记」这条主链路。
+把视频变成**带时间轴、正文内嵌画面**的 Markdown 笔记的 Linux 命令行工具。自用取向：没有 Web 界面、没有服务端、没有打包，只保留「取字幕 / 本地转写 → 视觉大模型看图写笔记」这条主链路。
 
 核心代码取自 [VideoToNo](https://github.com/like-attract/video-to-note)（MIT），去掉了 FastAPI、MCP、托盘、扫码登录、HTML/PNG 导出和密钥加密，改成适合终端与脚本调用的形式。
 
@@ -11,8 +11,8 @@
 - 本地转写：faster-whisper（默认 `base`），也支持中文 CPU 更快的 `paraformer-zh`。
 - B 站：AI 字幕、多分 P 合并、`b23.tv` 短链、视频页 412 时回退开放接口。
 - 笔记：详细 / 忠实复原 / 精简三种风格；长转录按时间顺序分段写完整，不预先压成摘要。
+- 图文：默认按间隔抽帧，把画面和时间点一起发给视觉模型，由模型决定插在哪段正文之后；幻灯片、图表、代码、演示操作会成为正文里的图片，而不是全部堆在末尾。
 - 输出：Markdown 笔记，以及带时间轴的 Markdown / JSON / SRT 转录稿。
-- 可选抽帧：URL 下载低清预览视频、本地视频直接用原文件，按间隔抽帧并附在笔记末尾。
 - 复用：同一输入重复运行会复用已缓存的转录；也可以直接从已有转录稿重新生成笔记。
 - 无需 Key：`--transcript-only` 只取字幕/转写，全程不调用大模型。
 
@@ -76,7 +76,7 @@ buvid3 = ""
 dir = "~/notes/video"
 
 [screenshots]
-enabled = false        # 是否默认抽帧；命令行 --screenshots / --no-screenshots 可覆盖
+enabled = true         # 抽帧并把画面插进正文（需要支持图片输入的模型）
 interval = 30          # 抽帧间隔（秒），5-300
 ```
 
@@ -117,7 +117,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --out /data/notes
 ## 用法
 
 ```bash
-# 生成笔记
+# 生成图文笔记（默认抽帧，画面按内容插进正文）
 video-note 'https://www.bilibili.com/video/BVxxxx'
 
 # 只要带时间轴的转录稿，不需要 API Key
@@ -141,11 +141,11 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --cookie-file ~/cookies.txt
 # 生成笔记时顺便把转录稿也放到输出目录
 video-note 'https://www.bilibili.com/video/BVxxxx' --save-transcript
 
-# 从视频画面抽帧，每 30 秒一张，附在笔记末尾
-video-note 'https://www.bilibili.com/video/BVxxxx' --screenshots
+# 纯文本模型：关掉抽帧，只写文字笔记
+video-note 'https://www.bilibili.com/video/BVxxxx' --no-screenshots
 
-# 改成每 10 秒一张
-video-note ./lecture.mp4 --screenshots --screenshot-interval 10
+# 改成每 10 秒抽一帧，画面更密
+video-note ./lecture.mp4 --screenshot-interval 10
 
 # 完成后删除缓存里的音频和截图缓存，只保留转录
 video-note 'https://www.bilibili.com/video/BVxxxx' --clean
@@ -167,7 +167,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `--device cpu\|cuda` | 转写设备 |
 | `--provider/--base-url/--model/--api-key` | 临时覆盖模型配置 |
 | `--cookie-file FILE` | Netscape 格式 cookies.txt |
-| `--screenshots / --no-screenshots` | 是否抽帧并附在笔记末尾 |
+| `--screenshots / --no-screenshots` | 是否抽帧并把画面插进正文（默认开启） |
 | `--screenshot-interval SECONDS` | 抽帧间隔，5-300 秒，默认 30；指定即启用抽帧 |
 | `--reuse / --no-reuse` | 复用已有转录，默认开启 |
 | `--clean` | 完成后清理缓存音频、预览视频和截图缓存 |
@@ -180,7 +180,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 
 - 笔记：`<标题>.md`
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
-- 截图：`<标题>.frames/frame_0001_30s.jpg`，笔记末尾以相对路径引用
+- 截图：`<标题>.frames/frame_0001_30s.jpg`，正文内嵌引用；模型一张都没引用时追加到末尾的 `## 视频截图`
 - B 站分 P：`<标题>-P1,3.md`（转录稿同理）
 - 重名时自动加 `-2`、`-3`
 
@@ -198,19 +198,24 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 rm -rf ~/.cache/video-note/runs
 ```
 
-## 视频截图
+## 图文笔记
 
-开启后（配置 `[screenshots] enabled = true`，或命令行 `--screenshots`）：
+开启后（默认 `[screenshots] enabled = true`，命令行 `--screenshots` / `--no-screenshots` 可覆盖）：
 
 - URL：额外下载一份低清预览视频，不下载完整高清视频
 - 本地视频：直接从本地文件抽帧
 - 按 `interval` 秒抽一帧，存到输出目录的 `<标题>.frames/`；本地大分辨率视频会缩到最大宽度 1280
-- 笔记末尾追加 `## 视频截图`，用相对路径引用图片，例如 `![截图 00:30](<./标题.frames/frame_0001_30s.jpg>)`
+- 相邻或近期几乎相同的画面只留一张：静态幻灯片不会在正文里重复出现
+- 长视频按段直写，每段只带该时间段的画面，单次请求最多 16 张
+- 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](<./标题.frames/frame_0002_60s.jpg>)`，并且只把正文真正引用的帧复制到 `.frames/`
+- 模型一张都没引用时，退化成笔记末尾的 `## 视频截图` 图库（最多 12 张），保证画面不丢
 - 字幕文件 / `--from-transcript` 输入没有视频画面，会跳过抽帧
 - `--transcript-only` 只输出转录，也会跳过抽帧
 - `--clean` 会清理缓存里的预览视频和截图缓存，但输出目录里已经发布的 `.frames/` 会保留
 
 截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新抽帧；换间隔会按新间隔重新抽。`--no-reuse` 可强制重跑。截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
+
+**需要视觉模型。** 画面以 base64 图片随请求发送，模型必须支持图片输入（默认的 `deepseek-flash`、`gpt-4o`、`qwen-vl`、`glm-4v`、Kimi 视觉版等）。模型拒绝图片时程序会在日志里明确报错并提示换模型；只想要文字笔记就加 `--no-screenshots`，纯文本模型照样可用。
 
 ## B 站 AI 字幕
 
@@ -260,6 +265,8 @@ video-note ... \
 
 本地端点（`localhost` / `127.0.0.1`）不填 Key 时会自动使用占位 Key `local`。远程接口需要 `api_key`；只要转录稿时用 `--transcript-only`，完全不需要配置模型。
 
+图文笔记要求模型能读图。默认的 `deepseek-flash`（V4.1 Flash）原生支持图片输入，`deepseek-v4-pro` 只支持文字；接本地视觉模型（如 vLLM + Qwen2.5-VL）同样走 `custom`。截图以 base64 `image_url` 随请求发送，模型不支持图片时会直接报错。
+
 ## 常见问题
 
 **模型下载失败 / 网络不可达**
@@ -281,11 +288,12 @@ video-note 'URL' --transcript-only
 # 然后让 agent/自己读 transcript.md（或 json）整理
 ```
 
-**截图没有生成**
+**笔记里没有插图 / 报错说模型不接受图片**
 
-- `--transcript-only` 只输出转录，不会抽帧
-- 字幕文件 / `--from-transcript` 没有视频画面，不会抽帧
-- 检查配置 `[screenshots] enabled`，或显式加 `--screenshots`
+- 图文笔记需要支持图片输入的模型：默认的 `deepseek-flash` 就支持，也可换 `qwen-vl` / `glm-4v` / `gpt-4o`；`deepseek-v4-pro` 只支持文字，或加 `--no-screenshots` 只写文字
+- `--transcript-only`、字幕文件、`--from-transcript` 没有画面，不会插图
+- 模型认为画面没有信息时可以不插；一张都没插时会在笔记末尾附图
+- 觉得插图太稀：把 `--screenshot-interval` 调小（如 10 秒），让画面更密
 - 抽帧间隔必须在 5-300 秒之间
 - 预览视频下载失败时日志会说明，笔记仍会正常生成；可以稍后重试或改用本地视频
 
@@ -310,8 +318,9 @@ src/video_note/
   settings.py          TOML/环境变量配置
   bili_cookies.py      cookies.txt 读取
   transcript_files.py  转录稿读写（JSON/Markdown/SRT）
-  render.py            笔记头尾、截图区块、文件名、错误文案
+  render.py            笔记头尾、插图占位符解析、文件名、错误文案
   screenshots.py       PyAV 抽帧与 JPEG 输出
+  video_frames.py      截图模型、按时间段选取、抽稀、去重、视觉接口编码
   transcript.py        时间轴、切块、质量检查（上游代码）
   video_processor.py   下载、平台字幕、B 站 AI 字幕（上游代码）
   whisper_asr.py       faster-whisper 转写（上游代码）

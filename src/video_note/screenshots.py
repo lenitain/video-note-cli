@@ -6,6 +6,8 @@ from typing import Callable
 
 import av
 
+from .video_frames import VideoFrame
+
 MAX_FRAME_WIDTH = 1280
 
 
@@ -14,7 +16,7 @@ def extract_video_frames(
     frames_dir: Path,
     interval: int,
     should_abort: Callable[[], bool] | None = None,
-) -> list[Path]:
+) -> list[VideoFrame]:
     """Extract one JPEG frame every `interval` seconds from a video file.
 
     Writes frames as frame_0000_0s.jpg, frame_0001_30s.jpg, ... and drops a
@@ -35,7 +37,7 @@ def extract_video_frames(
         old_frame.unlink(missing_ok=True)
     (frames_dir / ".complete").unlink(missing_ok=True)
 
-    frames: list[Path] = []
+    frames: list[VideoFrame] = []
     with av.open(str(video_path)) as container:
         if not container.streams.video:
             return []
@@ -62,7 +64,9 @@ def extract_video_frames(
             except Exception as exc:
                 raise RuntimeError(f"视频帧转换成图片失败：{exc}") from exc
             image.save(path, format="JPEG", quality=82)
-            frames.append(path)
+            frames.append(
+                VideoFrame(index=index, seconds=float(timestamp), path=path)
+            )
 
     if frames:
         (frames_dir / ".complete").write_text(
@@ -76,7 +80,7 @@ async def extract_video_frames_async(
     frames_dir: Path,
     interval: int,
     should_abort: Callable[[], bool] | None = None,
-) -> list[Path]:
+) -> list[VideoFrame]:
     return await asyncio.to_thread(
         extract_video_frames, video_path, frames_dir, interval, should_abort
     )

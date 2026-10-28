@@ -1,7 +1,7 @@
 [project]
 name = "video-note-cli"
 version = "0.1.0"
-description = "Turn videos into timestamped Markdown notes from the Linux command line"
+description = "Turn videos into timestamped, illustrated Markdown notes from the Linux command line"
 requires-python = ">=3.11"
 dependencies = [
     "yt-dlp>=2025.1.1",

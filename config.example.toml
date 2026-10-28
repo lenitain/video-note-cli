@@ -6,6 +6,8 @@
 provider = "deepseek"
 # Only needed for custom; leave empty for built-in providers.
 base_url = ""
+# 留空用 provider 默认模型。deepseek 默认的 deepseek-flash 原生支持图片输入；
+# deepseek-v4-pro 只支持文字，图文笔记需要换回 flash 或别的视觉模型。
 model = ""
 # Plain text on purpose: this is a personal, local-only setup.
 # Can be left empty and supplied via VIDEO_NOTE_API_KEY or a provider variable
@@ -33,7 +35,8 @@ buvid3 = ""
 dir = "~/notes/video"
 
 [screenshots]
-# 是否从视频画面抽帧并附在笔记末尾；命令行 --screenshots / --no-screenshots 可覆盖。
-enabled = false
+# 抽帧并把画面按内容插进笔记正文。需要支持视觉（图片输入）的模型；
+# 命令行 --screenshots / --no-screenshots 可覆盖。
+enabled = true
 # 抽帧间隔（秒），5-300。
 interval = 30

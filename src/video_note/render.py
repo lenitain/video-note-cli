@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .transcript import format_timestamp
+from .video_frames import VideoFrame
 
 SAFE_NAME_LIMIT = 80
 API_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b")
+# 模型在正文里写的插图标记：[[图片 0003：说明文字]]，编号对应 frame_0003_*.jpg。
+FRAME_PLACEHOLDER_RE = re.compile(
+    r"\[\[\s*图片\s*(\d{1,4})\s*(?:[：:|｜]\s*([^\]\n]*?))?\s*\]\]"
+)
+MAX_FRAME_CAPTION_CHARACTERS = 40
 
 
 def format_video_duration(seconds: float) -> str:
@@ -103,18 +108,48 @@ def summary_style_label(style: str) -> str:
 def append_screenshot_section(
     summary: str,
     frames_dir_name: str,
-    frames: list[Path],
+    frames: Sequence[VideoFrame],
 ) -> str:
-    """Append a Markdown image gallery that points at sibling frame files."""
+    """Append a Markdown gallery for notes where the model used no inline frames."""
     lines = ["## 视频截图", ""]
-    for index, frame in enumerate(frames, start=1):
-        label = f"截图 {index}"
-        match = re.search(r"_(\d+)s$", frame.stem)
-        if match:
-            label = f"截图 {format_timestamp(int(match.group(1)))}"
-        lines.append(f"![{label}](<./{frames_dir_name}/{frame.name}>)")
+    for frame in frames:
+        label = f"截图 {frame.timestamp}"
+        lines.append(
+            f"![{label}](<./{frames_dir_name}/{frame.filename}>)"
+        )
         lines.append("")
     return summary.rstrip() + "\n\n" + "\n".join(lines).rstrip() + "\n"
+
+
+def resolve_frame_placeholders(
+    text: str,
+    frames_dir_name: str,
+    frames: Sequence[VideoFrame],
+) -> tuple[str, set[str]]:
+    """Turn ``[[图片 0003：说明]]`` markers into inline Markdown images.
+
+    Unknown ids and repeated uses of the same frame are dropped, so the note only
+    points at images that exist and each picture appears once. Returns the new
+    text and the ids that were actually placed.
+    """
+    by_id = {frame.frame_id: frame for frame in frames}
+    used: set[str] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        frame = by_id.get(f"{int(match.group(1)):04d}")
+        if frame is None or frame.frame_id in used:
+            return ""
+        used.add(frame.frame_id)
+        caption = _clean_frame_caption(match.group(2)) or f"画面 {frame.timestamp}"
+        return f"![{caption}](<./{frames_dir_name}/{frame.filename}>)"
+
+    resolved = FRAME_PLACEHOLDER_RE.sub(replace, text)
+    return resolved, used
+
+
+def _clean_frame_caption(value: str | None) -> str:
+    text = re.sub(r"\s+", " ", (value or "").replace("[", "").replace("]", ""))
+    return text.strip()[:MAX_FRAME_CAPTION_CHARACTERS]
 
 
 def append_note_footer(

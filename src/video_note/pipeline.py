@@ -13,7 +13,12 @@ from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from .bili_cookies import resolve_bilibili_cookies
-from .llm_summarizer import LLMSummarizer, PROVIDER_DEFAULTS, default_base_url
+from .llm_summarizer import (
+    LLMSummarizer,
+    PROVIDER_DEFAULTS,
+    default_base_url,
+    looks_like_vision_rejection,
+)
 from .paraformer_asr import ParaformerTranscriber
 from .render import (
     append_note_footer,
@@ -23,6 +28,7 @@ from .render import (
     format_publish_time,
     friendly_llm_error_message,
     redact_secrets,
+    resolve_frame_placeholders,
 )
 from .screenshots import extract_video_frames_async
 from .settings import (
@@ -41,6 +47,12 @@ from .transcript_files import (
     unique_transcript_stem,
     write_transcript_artifacts,
 )
+from .video_frames import (
+    VideoFrame,
+    drop_duplicate_frames,
+    evenly_sample_frames,
+    load_frames,
+)
 from .video_processor import (
     BiliPage,
     VideoProcessor,
@@ -54,6 +66,10 @@ from .whisper_asr import WHISPER_MODEL_REPOS, WhisperTranscriber
 
 class PipelineError(Exception):
     """A user-facing failure with an actionable message."""
+
+
+# 模型一张图都没引用时，末尾附图最多发这么多张：够用，也不把输出目录塞满。
+MAX_GALLERY_FRAMES = 12
 
 
 class CancelledRun(Exception):
@@ -231,7 +247,7 @@ async def run_video_note_pipeline(
         )
         _check_quality(bundle, options)
 
-        frames: list[Path] = []
+        frames: list[VideoFrame] = []
         if options.screenshots:
             if options.transcript_only:
                 log("仅转录模式不生成笔记，跳过截图")
@@ -948,7 +964,7 @@ async def _generate_note(
     settings: UserSettings,
     summarizer: LLMSummarizer,
     cancel: Cancellation,
-    frames: Sequence[Path],
+    frames: Sequence[VideoFrame],
 ) -> tuple[Path, dict[str, Path]]:
     output_dir = options.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -978,6 +994,8 @@ async def _generate_note(
         f"model={summarizer.model}，base_url={summarizer.base_url}"
     )
     log(f"推理设置：{summarizer.describe_effort(options.effort, options.style)}")
+    if frames:
+        log(f"随请求发送截图：{len(frames)} 张（正文由模型按内容插图）")
     try:
         summary = await summarizer.generate_summary(
             resolved.title,
@@ -987,10 +1005,17 @@ async def _generate_note(
             reasoning_effort=options.effort,
             progress_callback=report_progress,
             should_abort=cancel.is_set,
+            frames=frames,
         )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        if frames and looks_like_vision_rejection(exc):
+            raise PipelineError(
+                "当前模型不接受图片输入，而图文笔记需要视觉模型。请换用支持图片的 "
+                "provider/模型（如 deepseek-flash、gpt-4o、qwen-vl、glm-4v 系列），"
+                "或加 --no-screenshots 只生成文字笔记。"
+            ) from exc
         message = redact_secrets(
             str(exc), settings.llm.api_key.strip()
         )
@@ -1007,19 +1032,9 @@ async def _generate_note(
 
     summary = build_note_header(summary, resolved.title, resolved.info)
     if frames:
-        frames_dir = _unique_frames_directory(
-            output_dir, f"{note_path.stem}.frames"
+        summary = _publish_note_frames(
+            summary, frames, output_dir, note_path.stem
         )
-        try:
-            frames_dir.mkdir(parents=True, exist_ok=False)
-            for frame in frames:
-                shutil.copy2(frame, frames_dir / frame.name)
-            summary = append_screenshot_section(
-                summary, frames_dir.name, list(frames)
-            )
-            log(f"截图目录：{frames_dir}（{len(frames)} 张）")
-        except OSError as exc:
-            log(f"截图写入失败，笔记继续：{exc}")
     summary = append_note_footer(
         summary,
         resolved.source_label,
@@ -1040,6 +1055,38 @@ async def _generate_note(
     return note_path, transcript_paths
 
 
+def _publish_note_frames(
+    summary: str,
+    frames: Sequence[VideoFrame],
+    output_dir: Path,
+    note_stem: str,
+) -> str:
+    """Resolve inline frame markers and copy only the pictures the note uses.
+
+    If the model placed no marker at all, fall back to a gallery at the end so
+    the note still carries the video's visuals instead of silently losing them.
+    """
+    frames_dir = _unique_frames_directory(output_dir, f"{note_stem}.frames")
+    summary, used_ids = resolve_frame_placeholders(
+        summary, frames_dir.name, frames
+    )
+    published = [frame for frame in frames if frame.frame_id in used_ids]
+    if published:
+        log(f"正文插图：{len(published)} 张")
+    else:
+        published = evenly_sample_frames(frames, MAX_GALLERY_FRAMES)
+        summary = append_screenshot_section(summary, frames_dir.name, published)
+        log(f"模型未在正文引用截图，改为末尾附图 {len(published)} 张")
+    try:
+        frames_dir.mkdir(parents=True, exist_ok=False)
+        for frame in published:
+            shutil.copy2(frame.path, frames_dir / frame.filename)
+        log(f"截图目录：{frames_dir}")
+    except OSError as exc:
+        log(f"截图写入失败，笔记继续：{exc}")
+    return summary
+
+
 async def _prepare_screenshots(
     resolved: ResolvedInput,
     options: RunOptions,
@@ -1047,12 +1094,12 @@ async def _prepare_screenshots(
     video_processor: VideoProcessor,
     cookies: dict[str, str] | None,
     cancel: Cancellation,
-) -> list[Path]:
+) -> list[VideoFrame]:
     """Download the preview video (URL) or use the local file, then extract frames."""
     run_dir = _run_directory(resolved, options, settings)
     frames_dir = run_dir / f"frames_{options.screenshot_interval}"
     if options.reuse and (frames_dir / ".complete").is_file():
-        existing = sorted(frames_dir.glob("frame_*.jpg"))
+        existing = drop_duplicate_frames(load_frames(frames_dir))
         if existing:
             log(f"复用已有截图：{len(existing)} 张")
             return existing
@@ -1089,8 +1136,13 @@ async def _prepare_screenshots(
     if not frames:
         log("视频里没有可提取的画面，跳过截图")
         return []
-    log(f"已提取 {len(frames)} 张截图")
-    return frames
+    unique = drop_duplicate_frames(frames)
+    skipped = len(frames) - len(unique)
+    if skipped:
+        log(f"已提取 {len(frames)} 张截图，其中 {skipped} 张与上一张几乎相同，已跳过")
+    else:
+        log(f"已提取 {len(frames)} 张截图")
+    return unique
 
 
 async def _download_preview_video(

@@ -146,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--screenshots",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="从视频画面抽帧并附在笔记末尾（默认读取配置）",
+        help="抽帧并把画面插进笔记正文（默认读取配置，初始为开启）",
     )
     parser.add_argument(
         "--screenshot-interval",
