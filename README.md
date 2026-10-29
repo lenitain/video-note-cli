@@ -58,10 +58,13 @@ $EDITOR ~/.config/video-note/config.toml
 
 ```toml
 [llm]
-provider = "deepseek"      # deepseek/openai/openai_gpt4/openai_gpt35/qwen/glm/moonshot/custom
+provider = "deepseek"      # deepseek/openai/openai_gpt4/openai_gpt35/qwen/glm/moonshot/minimax/minimax_cn/custom
 base_url = ""              # custom 必填；内置 provider 留空用默认地址
 model = ""                 # 留空用 provider 默认模型
-api_key = "sk-..."
+api_key = "sk-..."         # 按量计费 API Key（置空就是置空）
+api_key_env = "provider"   # 从环境变量读 Key；写 "provider" 用该 provider 的惯用变量名
+token_plan_key = ""        # Token Plan 订阅 Key（同一 provider 的另一种计费方式）
+token_plan_key_env = ""    # 从环境变量读订阅 Key
 
 [asr]
 model = "base"             # tiny/base/small/medium/large-v3/turbo/belle-turbo-zh/paraformer-zh
@@ -80,15 +83,39 @@ enabled = true         # 抽帧并把画面插进正文（需要支持图片输�
 interval = 30          # 抽帧间隔（秒），5-300
 ```
 
-环境变量会覆盖配置文件，命令行参数再覆盖环境变量：
+### API Key 从哪来
+
+**置空就是置空**：`api_key = ""` 就是没有 Key，不会再去别处找。要用环境变量里的 Key，
+得显式写出来：
+
+```toml
+[llm]
+api_key = ""              # 直接写值，或留空
+api_key_env = "provider"  # 环境变量名；"provider" = 该 provider 的惯用变量名
+```
+
+| 写法 | 含义 |
+|---|---|
+| `api_key = "sk-..."` | 直接用这个 Key |
+| `api_key_env = "MY_KEY"` | 读环境变量 `MY_KEY`（没设就是没有 Key） |
+| `api_key_env = "provider"` | 读该 provider 的惯用变量名（`deepseek` → `DEEPSEEK_API_KEY`，`minimax_cn` → `MINIMAX_CN_API_KEY`…） |
+| `token_plan_key` / `token_plan_key_env` | 同上，Token Plan 订阅 Key 那把 |
+
+两个都给时直接写的值优先。真正生效的是哪一把，每次跑都会打出来：
+
+```
+[video-note] 调用模型：provider=minimax_cn，model=MiniMax-M3.1-Flash，base_url=https://api.minimaxi.com/v1，Key 来自环境变量 MINIMAX_CN_API_KEY
+```
+
+命令行同义：`--api-key`、`--api-key-env`、`--token-plan-key`、`--token-plan-key-env`。
+
+其他设置仍然是环境变量覆盖配置文件，命令行参数再覆盖环境变量：
 
 | 变量 | 含义 |
 |---|---|
 | `VIDEO_NOTE_PROVIDER` | `provider` |
 | `VIDEO_NOTE_BASE_URL` | `base_url` |
 | `VIDEO_NOTE_MODEL` | `model` |
-| `VIDEO_NOTE_API_KEY` | `api_key`（优先级最高，覆盖配置文件） |
-| `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` / `ZHIPUAI_API_KEY` / `MOONSHOT_API_KEY` | 对应 provider 的常用 Key 变量；仅在配置文件 `api_key` 为空时使用 |
 | `VIDEO_NOTE_ASR_MODEL` | 转写模型 |
 | `VIDEO_NOTE_DEVICE` | `cpu` / `cuda` |
 | `VIDEO_NOTE_OUTPUT_DIR` | 输出目录 |
@@ -98,14 +125,25 @@ interval = 30          # 抽帧间隔（秒），5-300
 | `WHISPER_CACHE_DIR` | 模型缓存目录 |
 | `HF_ENDPOINT` | 模型下载源，默认 `https://hf-mirror.com` |
 
-不写配置文件也能用环境变量临时跑，例如：
+Key 类变量的常用名字（要显式指名的那些）：`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPUAI_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`、`MINIMAX_CN_API_KEY`（按量计费），`MINIMAX_TOKEN_PLAN_API_KEY`、`MINIMAX_CN_TOKEN_PLAN_API_KEY`（Token Plan 订阅）。
+
+不写配置文件也能用环境变量临时跑（Key 类变量要指明名字，其余设置直接生效）：
 
 ```bash
-# 通用变量，优先级最高
+# 通用变量：配置文件里写 api_key_env = "VIDEO_NOTE_API_KEY" 后可用
 VIDEO_NOTE_API_KEY=sk-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
 
-# DeepSeek 也可以用它的惯用变量名；配置文件里 api_key 留空即可
+# DeepSeek 的惯用变量名：配置文件里写 api_key_env = "provider" 后可用
 DEEPSEEK_API_KEY=sk-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
+
+# MiniMax 国内站：按量计费 Key
+MINIMAX_CN_API_KEY=sk-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
+
+# MiniMax 国内站：Token Plan 订阅 Key（同一 provider，换把 Key 而已）
+MINIMAX_CN_TOKEN_PLAN_API_KEY=sk-cp-xxx video-note 'https://www.bilibili.com/video/BVxxxx'
+
+# 临时换一把：命令行直接指名环境变量
+VIDEO_NOTE_API_KEY=sk-xxx video-note --api-key-env VIDEO_NOTE_API_KEY 'https://www.bilibili.com/video/BVxxxx'
 
 # 输出目录也可以在配置文件里改，或用环境变量/命令行临时覆盖
 VIDEO_NOTE_OUTPUT_DIR=/data/notes video-note 'https://www.bilibili.com/video/BVxxxx'
@@ -113,6 +151,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --out /data/notes
 ```
 
 优先级从低到高：内置默认值 → `~/.config/video-note/config.toml` → 环境变量 → 命令行参数。
+Key 例外：它的来源由 `api_key` / `api_key_env` 显式声明，不靠“配置里是空的”去猜。
 
 ## 用法
 
@@ -165,7 +204,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `--pages N[,N-M]` | B 站分 P 选择 |
 | `--asr MODEL` | 转写模型 |
 | `--device cpu\|cuda` | 转写设备 |
-| `--provider/--base-url/--model/--api-key` | 临时覆盖模型配置 |
+| `--provider/--base-url/--model/--api-key/--token-plan-key` | 临时覆盖模型配置 |
 | `--cookie-file FILE` | Netscape 格式 cookies.txt |
 | `--screenshots / --no-screenshots` | 是否抽帧并把画面插进正文（默认开启） |
 | `--screenshot-interval SECONDS` | 抽帧间隔，5-300 秒，默认 30；指定即启用抽帧 |
@@ -254,7 +293,7 @@ HF_ENDPOINT=https://huggingface.co video-note ...
 
 ## 模型接口
 
-内置 OpenAI 兼容 provider：DeepSeek、OpenAI、通义、智谱、Kimi。自定义网关或本地模型：
+内置 OpenAI 兼容 provider：DeepSeek、OpenAI、通义、智谱、Kimi、MiniMax。自定义网关或本地模型：
 
 ```bash
 video-note ... \
@@ -266,6 +305,50 @@ video-note ... \
 本地端点（`localhost` / `127.0.0.1`）不填 Key 时会自动使用占位 Key `local`。远程接口需要 `api_key`；只要转录稿时用 `--transcript-only`，完全不需要配置模型。
 
 图文笔记要求模型能读图。默认的 `deepseek-flash`（V4.1 Flash）原生支持图片输入，`deepseek-v4-pro` 只支持文字；接本地视觉模型（如 vLLM + Qwen2.5-VL）同样走 `custom`。截图以 base64 `image_url` 随请求发送，模型不支持图片时会直接报错。
+
+### MiniMax
+
+| provider | 地址 | 默认模型 |
+|---|---|---|
+| `minimax` | `https://api.minimax.io/v1`（境外站） | `MiniMax-M3.1-Flash` |
+| `minimax_cn` | `https://api.minimaxi.com/v1`（国内站） | `MiniMax-M3.1-Flash` |
+
+按量计费和订阅套餐是同一 provider 的两种计费方式，端点与模型一样，Key 不互通：
+
+```toml
+# 配置文件的 [llm] 段
+provider = "minimax_cn"
+api_key_env = "provider"           # → 读 MINIMAX_CN_API_KEY（按量计费）
+token_plan_key_env = "provider"    # → 读 MINIMAX_CN_TOKEN_PLAN_API_KEY（订阅）
+```
+
+```bash
+# 临时换一把：命令行指名环境变量
+MINIMAX_CN_API_KEY=sk-xxx video-note --api-key-env MINIMAX_CN_API_KEY 'URL'
+MINIMAX_CN_TOKEN_PLAN_API_KEY=sk-cp-xxx video-note --token-plan-key-env MINIMAX_CN_TOKEN_PLAN_API_KEY 'URL'
+```
+
+两把 Key 各占一个槽位：按量计费槽与订阅槽，谁填了用谁；两个都填时按量计费优先。真正生效的是哪一把，每次跑都会打出来：
+
+```
+[video-note] 调用模型：provider=minimax_cn，model=MiniMax-M3.1-Flash，base_url=https://api.minimaxi.com/v1，Key 来自环境变量 MINIMAX_CN_API_KEY
+```
+
+其他订阅制网关（如 TokenPlan 聚合网关）不是 provider，用 `custom` 指定端点即可：
+
+```bash
+video-note 'https://www.bilibili.com/video/BVxxxx' \
+  --provider custom \
+  --base-url https://discovery-api.intern-ai.org.cn/v1 \
+  --model minimax-m3 \
+  --api-key "$TOKENPLAN_API_KEY"
+```
+
+行为要点（均为实测）：
+
+- `MiniMax-M3.1-Flash` 原生多模态，能读 base64 `image_url`，图文笔记可以直接用；`MiniMax-M3` 及 M2.x 只支持文字。
+- M3.1 系列强制 adaptive thinking：关思考的 `reasoning_effort=none` 与 `thinking.type=disabled` 都会被接口 400 拒绝，所以 `--effort off` 会降成最低思考档 `low` 并给出提示，不会把任务打失败；`MiniMax-M3` 接受 `none`，`--effort off` 能真关掉思考。
+- 不指定档位（默认 `auto`）时成稿用 `high`、长视频逐段直写用 `off`，而不是模型默认的 `max`——M3.1 省略该参数时默认思考最长的一档，容易把输出额度吃满、正文写不出来。
 
 ## 常见问题
 
@@ -290,7 +373,7 @@ video-note 'URL' --transcript-only
 
 **笔记里没有插图 / 报错说模型不接受图片**
 
-- 图文笔记需要支持图片输入的模型：默认的 `deepseek-flash` 就支持，也可换 `qwen-vl` / `glm-4v` / `gpt-4o`；`deepseek-v4-pro` 只支持文字，或加 `--no-screenshots` 只写文字
+- 图文笔记需要支持图片输入的模型：默认的 `deepseek-flash` 就支持，也可换 `MiniMax-M3.1-Flash` / `qwen-vl` / `glm-4v` / `gpt-4o`；`deepseek-v4-pro` 只支持文字，或加 `--no-screenshots` 只写文字
 - `--transcript-only`、字幕文件、`--from-transcript` 没有画面，不会插图
 - 模型认为画面没有信息时可以不插；一张都没插时会在笔记末尾附图
 - 觉得插图太稀：把 `--screenshot-interval` 调小（如 10 秒），让画面更密

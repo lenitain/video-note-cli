@@ -2,7 +2,8 @@
 # Environment variables override this file; CLI flags override both.
 
 [llm]
-# deepseek / openai / openai_gpt4 / openai_gpt35 / qwen / glm / moonshot / custom
+# deepseek / openai / openai_gpt4 / openai_gpt35 / qwen / glm / moonshot /
+# minimax (MiniMax 境外站) / minimax_cn (MiniMax 国内站) / custom
 provider = "deepseek"
 # Only needed for custom; leave empty for built-in providers.
 base_url = ""
@@ -10,9 +11,15 @@ base_url = ""
 # deepseek-v4-pro 只支持文字，图文笔记需要换回 flash 或别的视觉模型。
 model = ""
 # Plain text on purpose: this is a personal, local-only setup.
-# Can be left empty and supplied via VIDEO_NOTE_API_KEY or a provider variable
-# such as DEEPSEEK_API_KEY / OPENAI_API_KEY.
+# 置空就是置空：程序不会再去别处找 Key。要用环境变量里的 Key 就写 api_key_env。
 api_key = ""
+# api_key 的来源：环境变量名；写 "provider" 表示该 provider 的惯用变量名
+# （deepseek → DEEPSEEK_API_KEY，minimax_cn → MINIMAX_CN_API_KEY …）。
+api_key_env = ""
+# Token Plan 订阅 Key（与 api_key 是同一 provider 的另一种计费方式，端点相同、
+# Key 不互通）。同样是置空即置空，要用环境变量就写 token_plan_key_env。
+token_plan_key = ""
+token_plan_key_env = ""
 
 [asr]
 # base = faster-whisper 的基础多语言模型（模型约 140MB，速度较快，准确率一般）

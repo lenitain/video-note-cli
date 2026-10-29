@@ -18,6 +18,7 @@ from .llm_summarizer import (
     PROVIDER_DEFAULTS,
     default_base_url,
     looks_like_vision_rejection,
+    normalize_provider,
 )
 from .paraformer_asr import ParaformerTranscriber
 from .render import (
@@ -34,8 +35,10 @@ from .screenshots import extract_video_frames_async
 from .settings import (
     ASRSettings,
     LLMSettings,
+    PROVIDER_API_KEY_ENV,
     UserSettings,
     model_cache_root,
+    resolve_credentials,
     runs_root,
 )
 from .transcript import TranscriptSegment, format_timestamp, transcript_quality
@@ -219,6 +222,8 @@ async def run_video_note_pipeline(
     """Run the whole video -> transcript -> note pipeline for one input."""
     cancel = cancel or Cancellation()
     _validate_options(options, settings)
+    # Key 的来源定案（命令行 --provider 也在内，所以放在这一步）
+    settings = resolve_credentials(settings)
 
     summarizer: LLMSummarizer | None = None
     if not options.transcript_only:
@@ -307,7 +312,7 @@ async def run_video_note_pipeline(
 
 def build_llm_summarizer(settings: LLMSettings) -> LLMSummarizer:
     """Validate LLM settings early, before a long download or transcription."""
-    provider = (settings.provider or "deepseek").strip().lower()
+    provider = normalize_provider(settings.provider or "deepseek")
     base_url = settings.base_url.strip() or default_base_url(provider)
     model = settings.model.strip() or None
 
@@ -332,9 +337,14 @@ def build_llm_summarizer(settings: LLMSettings) -> LLMSummarizer:
         if _is_local_endpoint(base_url):
             api_key = "local"
         else:
+            hint = ""
+            names = PROVIDER_API_KEY_ENV.get(provider, ())
+            if names:
+                hint = f"（该 provider 惯用 {names[0]}）"
             raise PipelineError(
                 "生成笔记需要 API Key。请在 ~/.config/video-note/config.toml 的 "
-                "[llm] 段填写 api_key，或设置 VIDEO_NOTE_API_KEY；"
+                "[llm] 段填写 api_key，或用 api_key_env 指定环境变量"
+                f"{hint}；"
                 "只要带时间轴的转录稿时加 --transcript-only，不需要 Key。"
             )
 
@@ -989,9 +999,11 @@ async def _generate_note(
             raise asyncio.CancelledError("任务已取消")
         log(f"笔记生成 {progress:>3}%：{message}")
 
+    source = settings.llm.api_key_source
     log(
         f"调用模型：provider={summarizer.model_type}，"
         f"model={summarizer.model}，base_url={summarizer.base_url}"
+        + (f"，Key 来自{source}" if source else "")
     )
     log(f"推理设置：{summarizer.describe_effort(options.effort, options.style)}")
     if frames:
@@ -1013,7 +1025,7 @@ async def _generate_note(
         if frames and looks_like_vision_rejection(exc):
             raise PipelineError(
                 "当前模型不接受图片输入，而图文笔记需要视觉模型。请换用支持图片的 "
-                "provider/模型（如 deepseek-flash、gpt-4o、qwen-vl、glm-4v 系列），"
+                "provider/模型（如 MiniMax-M3.1-Flash、gpt-4o、qwen-vl、glm-4v 系列），"
                 "或加 --no-screenshots 只生成文字笔记。"
             ) from exc
         message = redact_secrets(

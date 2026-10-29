@@ -104,7 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         metavar="NAME",
-        help="模型供应商标识：deepseek/openai/qwen/glm/moonshot/custom 等",
+        help=(
+            "模型供应商标识：deepseek/openai/qwen/glm/moonshot/minimax/"
+            "minimax_cn/custom 等"
+        ),
     )
     parser.add_argument(
         "--base-url",
@@ -119,7 +122,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--api-key",
         metavar="KEY",
-        help="API Key；建议写在配置或 VIDEO_NOTE_API_KEY 环境变量里",
+        help="API Key；建议写在配置的 [llm] api_key 里",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        metavar="VAR",
+        help=(
+            "从哪个环境变量读 API Key（如 DEEPSEEK_API_KEY）；"
+            "写 provider 则用该 provider 的惯用变量名"
+        ),
+    )
+    parser.add_argument(
+        "--token-plan-key",
+        metavar="KEY",
+        help=(
+            "Token Plan 订阅 Key；与按量计费的 API Key 是同一 provider 的两种计费方式，"
+            "端点相同、Key 不互通"
+        ),
+    )
+    parser.add_argument(
+        "--token-plan-key-env",
+        metavar="VAR",
+        help="从哪个环境变量读 Token Plan 订阅 Key",
     )
     parser.add_argument(
         "--cookie-file",
@@ -222,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.base_url,
             model=args.model,
             api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            token_plan_key=args.token_plan_key,
+            token_plan_key_env=args.token_plan_key_env,
             asr_model=args.asr,
             device=args.device,
             output_dir=args.out,

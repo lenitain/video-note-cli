@@ -37,12 +37,33 @@ PROVIDER_DEFAULTS = {
     ),
     "glm": ("https://open.bigmodel.cn/api/paas/v4", "glm-4.7-flash"),
     "moonshot": ("https://api.moonshot.cn/v1", "kimi-k3"),
+    # MiniMax 开放平台的 OpenAI 兼容端点：境外 .io / 国内 .com 两套地址。
+    # 按量计费 API Key 与 Token Plan 订阅 Key 都走这里——两把 Key 计费方式不同、
+    # 不互通，但端点与模型一样，所以“套餐”是凭据维度，不是 provider 维度。
+    "minimax": ("https://api.minimax.io/v1", "MiniMax-M3.1-Flash"),
+    "minimax_cn": ("https://api.minimaxi.com/v1", "MiniMax-M3.1-Flash"),
 }
+
+# 这些通道原生认 reasoning_effort（MiniMax 开放平台实测接受）
+MINIMAX_PROVIDERS = frozenset({"minimax", "minimax_cn"})
+
+# MiniMax-M3.1 系列强制 adaptive thinking：reasoning_effort=none 与
+# thinking.type=disabled 一律 400（"requires adaptive thinking"），合法值只有
+# low/medium/high/xhigh/max；MiniMax-M3 接受 none（实测 none 时 reasoning_content
+# 为空，思考确实关掉了）。
+MINIMAX_ALWAYS_THINKING_MARKERS = ("m3.1",)
+# 这些通道的档位取值：关思考用 none，最高档用 max（其余档位原样透传）
+REASONING_EFFORT_VALUES = {"off": "none", "max": "max"}
+
+
+def normalize_provider(provider: str) -> str:
+    """把 provider 标识归一：小写 + 下划线（minimax-cn 与 minimax_cn 等价）。"""
+    return (provider or "").strip().lower().replace("-", "_")
 
 
 def default_base_url(model_type: str) -> str:
     """内置 Provider 的官方接口地址；custom 或未知 Provider 返回空串。"""
-    entry = PROVIDER_DEFAULTS.get((model_type or "").strip().lower())
+    entry = PROVIDER_DEFAULTS.get(normalize_provider(model_type))
     return entry[0] if entry else ""
 
 
@@ -370,6 +391,7 @@ class LLMSummarizer:
     ) -> None:
         if not api_key:
             raise ValueError("An API key is required")
+        model_type = normalize_provider(model_type)
         if model_type == "custom":
             if not base_url or not model:
                 raise ValueError("Custom providers require base_url and model")
@@ -1479,11 +1501,18 @@ class LLMSummarizer:
           但 ``section``（长视频的逐段直写）一律关闭思考——那一段材料只有几千字，
           是“照着原文整理成稿”的局部任务，思考链实测只会吃掉输出额度与时间
           （每段 1 万多字思考换 1 千字正文，28 分钟视频总耗时 44 分钟）；
+        - auto 在 MiniMax 通道同样给显式档位（成稿 high、逐段直写 off）：
+          MiniMax 省略 reasoning_effort 时用的是模型默认档，M3.1-Flash 的默认档是
+          max（思考链最长的一档），容易把输出额度吃满、正文写不出来；
         - 其余通道返回 auto，保持模型默认，不注入私有参数。
         """
         if selected in {"off", "high", "max"}:
             return selected
         if self._uses_deepseek_compatibility():
+            if stage == "section":
+                return SECTION_EFFORT
+            return STYLE_DEFAULT_EFFORT
+        if self.model_type in MINIMAX_PROVIDERS:
             if stage == "section":
                 return SECTION_EFFORT
             return STYLE_DEFAULT_EFFORT
@@ -1538,11 +1567,11 @@ class LLMSummarizer:
         不知道就别劝用户去改档位：custom / ollama 上换档既不会下发任何思考参数，也不会
         改变 ``_build_request`` 的额度（它的膨胀条件是 DeepSeek 兼容），照做只会原地重投。
         """
-        return self._uses_deepseek_compatibility() or self.model_type in {
-            "glm",
-            "qwen",
-            "openai",
-        }
+        return (
+            self._uses_deepseek_compatibility()
+            or self.model_type in {"glm", "qwen", "openai"}
+            or self.model_type in MINIMAX_PROVIDERS
+        )
 
     def _frame_data_url(self, frame: VideoFrame) -> str:
         """按路径缓存截图编码结果，避免重试与续写反复压缩同一批图片。"""
@@ -1610,9 +1639,12 @@ class LLMSummarizer:
             if self._uses_deepseek_compatibility() and effort != "off"
             else max_tokens
         )
-        if self.thinking_seen and not self._uses_deepseek_compatibility():
+        if (
+            self.thinking_seen or self._always_thinks()
+        ) and not self._uses_deepseek_compatibility():
             # 实测到这条通道在返回思考链，就把预留加在最终额度上，而不是去改各阶段传进来的
             # max_tokens——那个值表达的是"正文要写多长"，语义不该被通道行为污染。
+            # 强制思考的模型（M3.1 系列）第一次请求就带着思考链，不等实测到再加。
             thinking_budget += THINKING_RESERVE_TOKENS
         if budget != "omit":
             request[token_key] = thinking_budget if budget == "auto" else max_tokens
@@ -1849,6 +1881,8 @@ class LLMSummarizer:
             request["extra_body"] = {"thinking": {"type": "enabled" if enabled else "disabled"}}
         elif self.model_type == "qwen":
             request["extra_body"] = {"enable_thinking": enabled}
+        elif self.model_type in MINIMAX_PROVIDERS:
+            self._apply_effort_reasoning(request, effort)
         elif self.model_type == "openai":
             request["reasoning_effort"] = {
                 "off": "none",
@@ -1862,6 +1896,33 @@ class LLMSummarizer:
     def _warn_once(self, message: str) -> None:
         if message not in self.warnings:
             self.warnings.append(message)
+
+    def _apply_effort_reasoning(self, request: dict[str, Any], effort: str) -> None:
+        """把档位翻译成这条通道认的 reasoning_effort 取值。
+
+        MiniMax-M3.1 系列强制 adaptive thinking，关思考的 none/disabled 一律 400，
+        所以 off 只能降成最低思考档 low；MiniMax-M3 接受 none，关思考照常下发。
+        取值统一走 _send_reasoning_effort：
+        通道不认这个参数时先退到嵌套写法，再退到不下发，不会让整条任务栽在参数上。
+        """
+        if self._always_thinks():
+            value = "low" if effort == "off" else effort
+            if effort == "off":
+                self._warn_once(
+                    f"{self.model} 强制开启思考（adaptive thinking），"
+                    "--effort off 已降为最低思考档（low）"
+                )
+        else:
+            value = REASONING_EFFORT_VALUES.get(effort, effort)
+        if not self._send_reasoning_effort(request, value):
+            self._warn_once("该通道不支持思考强度参数，已按模型默认思考设置生成")
+
+    def _always_thinks(self) -> bool:
+        """这条通道上的模型是否强制开启思考（MiniMax-M3.1 系列的 adaptive thinking）。"""
+        if self.model_type not in MINIMAX_PROVIDERS:
+            return False
+        model = str(getattr(self, "model", "")).lower()
+        return any(marker in model for marker in MINIMAX_ALWAYS_THINKING_MARKERS)
 
     def _send_reasoning_effort(self, request: dict[str, Any], value: str) -> bool:
         """按兼容性阶梯下发思考档位，返回是否找到了可用写法。
@@ -1967,6 +2028,9 @@ class LLMSummarizer:
                 return True
             rejected = self.rejected_params
             return "reasoning_effort" not in rejected or "reasoning" not in rejected
+        if self.model_type in MINIMAX_PROVIDERS:
+            # 强制思考的模型关不掉思考：再重试一次也只是再烧一遍思考链
+            return not self._always_thinks()
         return self.model_type in {"openai", "glm", "qwen"}
 
     @staticmethod

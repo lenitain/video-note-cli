@@ -6,11 +6,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .llm_summarizer import normalize_provider
+
 APP_NAME = "video-note"
 DEFAULT_OUTPUT_DIR = "~/notes/video"
 
-# Common provider-specific environment variables. They are used only when
-# api_key is empty in config.toml; VIDEO_NOTE_API_KEY always wins.
+# 每个 provider 惯用的环境变量名。程序不会自己去找它们——要用就在配置里写
+# api_key_env = "provider"（跟着 provider 换）或 api_key_env = "变量名"。
 PROVIDER_API_KEY_ENV = {
     "deepseek": ("DEEPSEEK_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
@@ -19,6 +21,16 @@ PROVIDER_API_KEY_ENV = {
     "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
     "glm": ("ZHIPUAI_API_KEY", "GLM_API_KEY"),
     "moonshot": ("MOONSHOT_API_KEY", "KIMI_API_KEY"),
+    "minimax": ("MINIMAX_API_KEY",),
+    "minimax_cn": ("MINIMAX_CN_API_KEY",),
+}
+
+# Token Plan 订阅 Key：套餐维度，不是 provider 维度。按量计费 Key 与订阅 Key
+# 计费方式不同、不互通，但同一个 provider 的端点一样，所以它们是同一维度的
+# 两种凭据，各占一个槽位。
+PROVIDER_TOKEN_PLAN_KEY_ENV = {
+    "minimax": ("MINIMAX_TOKEN_PLAN_API_KEY",),
+    "minimax_cn": ("MINIMAX_CN_TOKEN_PLAN_API_KEY",),
 }
 
 
@@ -28,6 +40,10 @@ class LLMSettings:
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+    api_key_env: str = ""
+    token_plan_key: str = ""
+    token_plan_key_env: str = ""
+    api_key_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,12 +102,6 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
         llm = replace(llm, base_url=base_url)
     if model := _env("VIDEO_NOTE_MODEL"):
         llm = replace(llm, model=model)
-    if api_key := _env("VIDEO_NOTE_API_KEY"):
-        llm = replace(llm, api_key=api_key)
-    elif not llm.api_key:
-        provider_key = _provider_api_key_from_env(llm.provider)
-        if provider_key:
-            llm = replace(llm, api_key=provider_key)
 
     if model := _env("VIDEO_NOTE_ASR_MODEL"):
         asr = replace(asr, model=model)
@@ -137,6 +147,9 @@ def apply_cli_overrides(
     base_url: str | None = None,
     model: str | None = None,
     api_key: str | None = None,
+    api_key_env: str | None = None,
+    token_plan_key: str | None = None,
+    token_plan_key_env: str | None = None,
     asr_model: str | None = None,
     device: str | None = None,
     output_dir: str | None = None,
@@ -144,12 +157,31 @@ def apply_cli_overrides(
     screenshot_interval: int | None = None,
 ) -> UserSettings:
     """Apply explicit command-line values on top of config and environment."""
+    source = settings.llm.api_key_source
+    if api_key is not None:
+        source = "命令行 --api-key"
+    elif token_plan_key is not None:
+        source = "命令行 --token-plan-key"
     llm = replace(
         settings.llm,
         provider=provider or settings.llm.provider,
         base_url=base_url if base_url is not None else settings.llm.base_url,
         model=model if model is not None else settings.llm.model,
         api_key=api_key if api_key is not None else settings.llm.api_key,
+        api_key_env=(
+            api_key_env if api_key_env is not None else settings.llm.api_key_env
+        ),
+        token_plan_key=(
+            token_plan_key
+            if token_plan_key is not None
+            else settings.llm.token_plan_key
+        ),
+        token_plan_key_env=(
+            token_plan_key_env
+            if token_plan_key_env is not None
+            else settings.llm.token_plan_key_env
+        ),
+        api_key_source=source,
     )
     asr = replace(
         settings.asr,
@@ -230,6 +262,9 @@ def _llm_settings(section: dict[str, Any]) -> LLMSettings:
         base_url=_text(section, "base_url"),
         model=_text(section, "model"),
         api_key=_text(section, "api_key"),
+        api_key_env=_text(section, "api_key_env"),
+        token_plan_key=_text(section, "token_plan_key"),
+        token_plan_key_env=_text(section, "token_plan_key_env"),
     )
 
 
@@ -281,12 +316,65 @@ def _parse_int(value: Any, default: int) -> int:
         return default
 
 
-def _provider_api_key_from_env(provider: str) -> str:
-    for name in PROVIDER_API_KEY_ENV.get(provider.strip().lower(), ()):
-        value = _env(name)
+def _resolve_api_key(llm: LLMSettings) -> LLMSettings:
+    """Key 的来源只有两种：直接写的值，或显式指定的环境变量名。
+
+    置空就是置空：``api_key = ""`` 不会再去别处找 Key。要用环境变量就写
+    ``api_key_env = "变量名"``（写 ``"provider"`` 则用该 provider 的惯用变量名，
+    换 provider 时跟着换）。两个槽位都没给 Key 时就是没有 Key，由调用方报错。
+    """
+    api_key, api_source = _first_key(
+        (llm.api_key, "配置 api_key"),
+        _key_from_env(llm.api_key_env, PROVIDER_API_KEY_ENV, llm.provider),
+    )
+    plan_key, plan_source = _first_key(
+        (llm.token_plan_key, "配置 token_plan_key"),
+        _key_from_env(
+            llm.token_plan_key_env, PROVIDER_TOKEN_PLAN_KEY_ENV, llm.provider
+        ),
+    )
+    return replace(
+        llm,
+        api_key=api_key or plan_key,
+        token_plan_key=plan_key,
+        api_key_source=llm.api_key_source or api_source or plan_source,
+    )
+
+
+def _key_from_env(
+    name: str, table: dict[str, tuple[str, ...]], provider: str
+) -> tuple[str, str]:
+    """按设置里写的名字取 Key，返回 (Key, 来源说明)。
+
+    写具体变量名就照着取；写 ``provider`` 则用该 provider 的惯用变量名。
+    """
+    if not name:
+        return "", ""
+    if name.strip().lower() == "provider":
+        for variable in table.get(normalize_provider(provider), ()):
+            value = _env(variable)
+            if value:
+                return value, f"环境变量 {variable}"
+        return "", ""
+    value = _env(name)
+    return (value, f"环境变量 {name}") if value else ("", "")
+
+
+def _first_key(*candidates: tuple[str, str]) -> tuple[str, str]:
+    """按顺序取第一个非空的 (Key, 来源说明)。"""
+    for value, source in candidates:
         if value:
-            return value
-    return ""
+            return value, source
+    return "", ""
+
+
+def resolve_credentials(settings: UserSettings) -> UserSettings:
+    """定下实际用哪把 Key。
+
+    ``api_key_env = "provider"`` 依赖最终 provider，所以这一步必须晚于命令行覆盖，
+    只做一次（pipeline 入口调用）。
+    """
+    return replace(settings, llm=_resolve_api_key(settings.llm))
 
 
 def _env(name: str) -> str:
