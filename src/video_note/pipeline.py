@@ -13,8 +13,10 @@ from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from .bili_cookies import resolve_bilibili_cookies
+from .html_export import write_note_html
 from .llm_summarizer import (
     LLMSummarizer,
+    MAX_FRAMES_PER_REQUEST,
     PROVIDER_DEFAULTS,
     default_base_url,
     looks_like_vision_rejection,
@@ -27,11 +29,13 @@ from .render import (
     artifact_stem,
     build_note_header,
     format_publish_time,
+    frame_directory_name,
     friendly_llm_error_message,
     redact_secrets,
     resolve_frame_placeholders,
+    without_images,
 )
-from .screenshots import extract_video_frames_async
+from .screenshots import FrameSource, extract_frames_async
 from .settings import (
     ASRSettings,
     LLMSettings,
@@ -50,12 +54,7 @@ from .transcript_files import (
     unique_transcript_stem,
     write_transcript_artifacts,
 )
-from .video_frames import (
-    VideoFrame,
-    drop_duplicate_frames,
-    evenly_sample_frames,
-    load_frames,
-)
+from .video_frames import VideoFrame, evenly_sample_frames
 from .video_processor import (
     BiliPage,
     VideoProcessor,
@@ -94,6 +93,9 @@ class RunOptions:
     clean_media: bool = False
     screenshots: bool = False
     screenshot_interval: int = 30
+    write_markdown: bool = True
+    write_html: bool = True
+    md_images: bool = False
     cookie_file: Path | None = None
 
 
@@ -120,7 +122,7 @@ class TranscriptBundle:
 @dataclass(frozen=True)
 class RunResult:
     title: str
-    note_path: Path | None
+    note_files: list[Path]
     transcript_paths: dict[str, Path]
     segments: int
     source: str
@@ -252,6 +254,16 @@ async def run_video_note_pipeline(
         )
         _check_quality(bundle, options)
 
+        # 笔记路径先定下来：插图要直接抽到产物目录里的 <笔记>.frames，不再经过缓存。
+        note_path = (
+            None
+            if options.transcript_only
+            else unique_note_path(
+                options.output_dir,
+                artifact_stem(resolved.title, resolved.info, "note"),
+            )
+        )
+
         frames: list[VideoFrame] = []
         if options.screenshots:
             if options.transcript_only:
@@ -259,6 +271,7 @@ async def run_video_note_pipeline(
             elif resolved.kind in {"subtitle", "transcript"}:
                 log("当前输入没有视频画面，跳过截图")
             else:
+                assert note_path is not None
                 frames = await _prepare_screenshots(
                     resolved,
                     options,
@@ -266,6 +279,8 @@ async def run_video_note_pipeline(
                     video_processor,
                     cookies,
                     cancel,
+                    bundle.segments,
+                    _frames_directory(options.output_dir, note_path.stem),
                 )
 
         if options.transcript_only:
@@ -279,7 +294,7 @@ async def run_video_note_pipeline(
             _clean_run_cache(resolved, options, settings)
             return RunResult(
                 title=resolved.title,
-                note_path=None,
+                note_files=[],
                 transcript_paths=transcript_paths,
                 segments=len(bundle.segments),
                 source=bundle.source,
@@ -287,7 +302,9 @@ async def run_video_note_pipeline(
             )
 
         assert summarizer is not None
-        note_path, transcript_paths = await _generate_note(
+        assert note_path is not None
+        note_files, transcript_paths = await _generate_note(
+            note_path,
             resolved,
             bundle,
             options,
@@ -296,11 +313,11 @@ async def run_video_note_pipeline(
             cancel,
             frames,
         )
-        log(f"笔记完成：{note_path}")
+        log("笔记本完成：" + "，".join(str(path) for path in note_files))
         _clean_run_cache(resolved, options, settings)
         return RunResult(
             title=resolved.title,
-            note_path=note_path,
+            note_files=note_files,
             transcript_paths=transcript_paths,
             segments=len(bundle.segments),
             source=bundle.source,
@@ -564,7 +581,12 @@ async def _transcribe_bilibili(
         resolved.info["title"] = outcome.title
     if outcome.pages:
         resolved.info["bili_pages"] = [
-            {"page": page.page, "part": page.part} for page in outcome.pages
+            {
+                "page": page.page,
+                "part": page.part,
+                "duration": page.duration,
+            }
+            for page in outcome.pages
         ]
         resolved.info["bili_total_pages"] = outcome.total_pages
         resolved.info["duration"] = (
@@ -968,6 +990,7 @@ def _write_transcript_output(
 
 
 async def _generate_note(
+    note_path: Path,
     resolved: ResolvedInput,
     bundle: TranscriptBundle,
     options: RunOptions,
@@ -975,11 +998,8 @@ async def _generate_note(
     summarizer: LLMSummarizer,
     cancel: Cancellation,
     frames: Sequence[VideoFrame],
-) -> tuple[Path, dict[str, Path]]:
-    output_dir = options.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    note_stem = artifact_stem(resolved.title, resolved.info, "note")
-    note_path = unique_note_path(output_dir, note_stem)
+) -> tuple[list[Path], dict[str, Path]]:
+    options.output_dir.mkdir(parents=True, exist_ok=True)
 
     resolved.info["duration"] = (
         resolved.info.get("duration") or bundle.duration
@@ -1007,7 +1027,10 @@ async def _generate_note(
     )
     log(f"推理设置：{summarizer.describe_effort(options.effort, options.style)}")
     if frames:
-        log(f"随请求发送截图：{len(frames)} 张（正文由模型按内容插图）")
+        log(
+            f"可用截图：{len(frames)} 张"
+            f"（按段落分发，单次请求最多 {MAX_FRAMES_PER_REQUEST} 张）"
+        )
     try:
         summary = await summarizer.generate_summary(
             resolved.title,
@@ -1045,7 +1068,7 @@ async def _generate_note(
     summary = build_note_header(summary, resolved.title, resolved.info)
     if frames:
         summary = _publish_note_frames(
-            summary, frames, output_dir, note_path.stem
+            summary, frames, frames[0].path.parent.name
         )
     summary = append_note_footer(
         summary,
@@ -1054,7 +1077,19 @@ async def _generate_note(
         summarizer.model,
         options.style,
     )
-    note_path.write_text(summary, encoding="utf-8")
+    # 同一份内容出两件成品：Markdown 默认只留文字，HTML 带着图（图片内联）。
+    note_files: list[Path] = []
+    if options.write_markdown:
+        note_path.write_text(
+            summary if options.md_images else without_images(summary),
+            encoding="utf-8",
+        )
+        note_files.append(note_path)
+    if options.write_html:
+        try:
+            note_files.append(write_note_html(note_path, summary))
+        except OSError as exc:
+            log(f"HTML 导出失败：{exc}")
 
     transcript_paths: dict[str, Path] = {}
     if options.save_transcript:
@@ -1064,39 +1099,44 @@ async def _generate_note(
             options,
             stem=f"{note_path.stem}.transcript",
         )
-    return note_path, transcript_paths
+    return note_files, transcript_paths
+
+
+def _frames_directory(output_dir: Path, note_stem: str) -> Path:
+    """插图目录就放在笔记旁边：``<笔记>.frames/``。
+
+    抽帧直接写到这里，产物目录里既有成品的 HTML，也有原始截图；缓存里不再留图片。
+    """
+    name = frame_directory_name(note_stem)
+    candidate = output_dir / name
+    index = 2
+    while candidate.exists():
+        candidate = output_dir / f"{name}-{index}"
+        index += 1
+    return candidate
 
 
 def _publish_note_frames(
     summary: str,
     frames: Sequence[VideoFrame],
-    output_dir: Path,
-    note_stem: str,
+    frames_dir_name: str,
 ) -> str:
-    """Resolve inline frame markers and copy only the pictures the note uses.
+    """把模型写的插图标记换成正文图片（截图已经在本目录里，不再搬运）。
 
-    If the model placed no marker at all, fall back to a gallery at the end so
-    the note still carries the video's visuals instead of silently losing them.
+    模型一张都没标记时，末尾补一个图廊，保证成品里仍有画面。
     """
-    frames_dir = _unique_frames_directory(output_dir, f"{note_stem}.frames")
-    summary, used_ids = resolve_frame_placeholders(
-        summary, frames_dir.name, frames
+    summary, used_ids, issues = resolve_frame_placeholders(
+        summary, frames_dir_name, frames
     )
+    for issue in issues:
+        log(f"提示：{issue}")
     published = [frame for frame in frames if frame.frame_id in used_ids]
     if published:
         log(f"正文插图：{len(published)} 张")
-    else:
-        published = evenly_sample_frames(frames, MAX_GALLERY_FRAMES)
-        summary = append_screenshot_section(summary, frames_dir.name, published)
-        log(f"模型未在正文引用截图，改为末尾附图 {len(published)} 张")
-    try:
-        frames_dir.mkdir(parents=True, exist_ok=False)
-        for frame in published:
-            shutil.copy2(frame.path, frames_dir / frame.filename)
-        log(f"截图目录：{frames_dir}")
-    except OSError as exc:
-        log(f"截图写入失败，笔记继续：{exc}")
-    return summary
+        return summary
+    published = evenly_sample_frames(frames, MAX_GALLERY_FRAMES)
+    log(f"模型未在正文引用截图，改为末尾附图 {len(published)} 张")
+    return append_screenshot_section(summary, frames_dir_name, published)
 
 
 async def _prepare_screenshots(
@@ -1106,35 +1146,25 @@ async def _prepare_screenshots(
     video_processor: VideoProcessor,
     cookies: dict[str, str] | None,
     cancel: Cancellation,
+    segments: Sequence[TranscriptSegment],
+    frames_dir: Path,
 ) -> list[VideoFrame]:
-    """Download the preview video (URL) or use the local file, then extract frames."""
-    run_dir = _run_directory(resolved, options, settings)
-    frames_dir = run_dir / f"frames_{options.screenshot_interval}"
-    if options.reuse and (frames_dir / ".complete").is_file():
-        existing = drop_duplicate_frames(load_frames(frames_dir))
-        if existing:
-            log(f"复用已有截图：{len(existing)} 张")
-            return existing
+    """Download one preview per 分P (or use the local file), then cut 画面段落.
 
+    截图直接写进产物目录的 ``<笔记>.frames/``；缓存里只留音频与预览视频。
+    """
+    run_dir = _run_directory(resolved, options, settings)
     try:
-        if resolved.kind == "url":
-            video_path = await _download_preview_video(
-                video_processor,
-                resolved.source,
-                run_dir.name,
-                cookies,
-                cancel,
-            )
-        else:
-            assert resolved.media_path is not None
-            video_path = resolved.media_path
+        sources = await _frame_sources(
+            resolved, video_processor, cookies, cancel, run_dir, segments
+        )
         cancel.check()
         log(
-            f"抽帧：每 {options.screenshot_interval} 秒一张"
-            f"（{video_path.name}）"
+            "抽帧：按画面切换切分，每段留一张代表帧"
+            f"（{'、'.join(source.path.name for source in sources)}）"
         )
-        frames = await extract_video_frames_async(
-            video_path,
+        frames = await extract_frames_async(
+            sources,
             frames_dir,
             options.screenshot_interval,
             cancel.is_set,
@@ -1148,13 +1178,104 @@ async def _prepare_screenshots(
     if not frames:
         log("视频里没有可提取的画面，跳过截图")
         return []
-    unique = drop_duplicate_frames(frames)
-    skipped = len(frames) - len(unique)
-    if skipped:
-        log(f"已提取 {len(frames)} 张截图，其中 {skipped} 张与上一张几乎相同，已跳过")
-    else:
-        log(f"已提取 {len(frames)} 张截图")
-    return unique
+    log(
+        f"已提取 {len(frames)} 张截图，"
+        f"覆盖 00:00–{format_timestamp(frames[-1].span_end)}"
+    )
+    return frames
+
+
+async def _frame_sources(
+    resolved: ResolvedInput,
+    video_processor: VideoProcessor,
+    cookies: dict[str, str] | None,
+    cancel: Cancellation,
+    run_dir: Path,
+    segments: Sequence[TranscriptSegment],
+) -> list[FrameSource]:
+    """每个分 P 一个预览视频，各自带着自己在合并时间轴上的偏移。"""
+    if resolved.kind != "url":
+        assert resolved.media_path is not None
+        return [FrameSource(resolved.media_path)]
+
+    pages = _bilibili_frame_pages(resolved, segments)
+    if not pages:
+        preview = await _download_preview_video(
+            video_processor, resolved.source, run_dir.name, cookies, cancel
+        )
+        return [FrameSource(preview)]
+
+    sources: list[FrameSource] = []
+    for page, url, offset in pages:
+        preview = await _download_preview_video(
+            video_processor,
+            url,
+            run_dir.name,
+            cookies,
+            cancel,
+            media_name=f"preview_p{page}",
+        )
+        sources.append(FrameSource(preview, offset))
+    return sources
+
+
+def _bilibili_frame_pages(
+    resolved: ResolvedInput, segments: Sequence[TranscriptSegment]
+) -> list[tuple[int, str, float]]:
+    """每个分 P 的 (页码, 播放地址, 合并时间轴偏移)；单 P 或偏移不可知时返回空。
+
+    偏移优先取接口给的分 P 时长——``merge_bilibili_pages`` 累加的就是同一个值；
+    读缓存转录时 run.json 里可能没有时长，退回用转录里的「【P{n} 分P名】」标记定位。
+    """
+    pages = resolved.info.get("bili_pages") or []
+    if len(pages) < 2:
+        return []
+    numbers = [int(page.get("page") or 0) for page in pages]
+    offsets = _page_offsets(pages) or _page_offsets_from_markers(
+        numbers, segments
+    )
+    if not offsets:
+        log(
+            "分 P 时长未知，预览视频只能覆盖第 1 个分 P，"
+            "后半部分没有截图；加 --no-reuse 或重新转写可恢复"
+        )
+        return []
+    return [
+        (number, bilibili_page_url(resolved.source, number), offsets[number])
+        for number in numbers
+    ]
+
+
+def _page_offsets(pages: Sequence[dict[str, Any]]) -> dict[int, float]:
+    offsets: dict[int, float] = {}
+    cursor = 0.0
+    for page in pages:
+        try:
+            number = int(page.get("page") or 0)
+            duration = float(page.get("duration") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if number <= 0 or duration <= 0:
+            return {}
+        offsets[number] = cursor
+        cursor += duration
+    return offsets
+
+
+def _page_offsets_from_markers(
+    numbers: Sequence[int], segments: Sequence[TranscriptSegment]
+) -> dict[int, float]:
+    """用转录里的分 P 标记反推各 P 起点：每 P 的第一段带着「【P{n} …】」。"""
+    offsets = {numbers[0]: 0.0}
+    for number in numbers[1:]:
+        marker = f"【P{number} "
+        segment = next(
+            (item for item in segments if item.text.startswith(marker)), None
+        )
+        if segment is None:
+            return {}
+        offsets[number] = segment.start
+    return offsets
 
 
 async def _download_preview_video(
@@ -1163,19 +1284,21 @@ async def _download_preview_video(
     run_key: str,
     cookies: dict[str, str] | None,
     cancel: Cancellation,
+    media_name: str = "preview",
 ) -> Path:
     run_dir = runs_root() / run_key
-    cached = _find_cached_media(run_dir, "preview")
+    cached = _find_cached_media(run_dir, media_name)
     if cached is not None:
         log(f"复用已下载预览视频：{cached.name}")
         return cached
-    log("下载低清预览视频（用于抽帧）")
+    log(f"下载低清预览视频（用于抽帧）：{media_name}")
     try:
         return await video_processor.download_preview_video(
             url,
             run_key,
             cookies,
             should_abort=cancel.is_set,
+            media_name=media_name,
         )
     except asyncio.CancelledError:
         raise
@@ -1183,15 +1306,6 @@ async def _download_preview_video(
         raise PipelineError(
             f"下载预览视频失败：{redact_secrets(str(exc))}"
         ) from exc
-
-
-def _unique_frames_directory(output_dir: Path, name: str) -> Path:
-    candidate = output_dir / name
-    index = 2
-    while candidate.exists():
-        candidate = output_dir / f"{name}-{index}"
-        index += 1
-    return candidate
 
 
 def _clean_run_cache(
@@ -1221,7 +1335,7 @@ def _find_cached_media(directory: Path, media_name: str) -> Path | None:
 
 def _remove_cached_media(directory: Path) -> None:
     removed = 0
-    for pattern in ("audio.*", "audio_p*.*", "preview.*"):
+    for pattern in ("audio.*", "audio_p*.*", "preview.*", "preview_p*.*"):
         for path in directory.glob(pattern):
             if path.is_file():
                 path.unlink(missing_ok=True)
@@ -1335,7 +1449,7 @@ def _validate_options(options: RunOptions, settings: UserSettings) -> None:
         )
     if options.screenshots and not 5 <= options.screenshot_interval <= 300:
         raise PipelineError(
-            f"抽帧间隔必须在 5-300 秒之间，当前为 {options.screenshot_interval}"
+            f"画面切分的最小间隔必须在 5-300 秒之间，当前为 {options.screenshot_interval}"
         )
     known_models = set(WHISPER_MODEL_REPOS) | {"paraformer-zh"}
     if settings.asr.model not in known_models:

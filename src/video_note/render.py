@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Sequence
 
-from .transcript import format_timestamp
+from .transcript import format_timestamp, parse_timestamp
 from .video_frames import VideoFrame
 
 SAFE_NAME_LIMIT = 80
@@ -12,6 +12,14 @@ API_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b")
 # 模型在正文里写的插图标记：[[图片 0003：说明文字]]，编号对应 frame_0003_*.jpg。
 FRAME_PLACEHOLDER_RE = re.compile(
     r"\[\[\s*图片\s*(\d{1,4})\s*(?:[：:|｜]\s*([^\]\n]*?))?\s*\]\]"
+)
+# 正文插图整行：![说明](./<笔记>.frames/xxx.jpg)。Markdown 成品要去掉这些行。
+FRAME_IMAGE_LINE_RE = re.compile(r"^!\[[^\]]*\]\(<?\./[^)>]+>?\)$")
+# 模型一张图都没引用时末尾补的图廊标题；图去掉后这个标题也要一起清掉。
+GALLERY_HEADING = "## 视频截图"
+# 小标题自带的时间区间：## 标题 [01:30-04:00]，插图归属按它判断。
+NOTE_BLOCK_SPAN_RE = re.compile(
+    r"\[(\d{1,3}(?::\d{2}){1,2})\s*[-–~]\s*(\d{1,3}(?::\d{2}){1,2})\]"
 )
 MAX_FRAME_CAPTION_CHARACTERS = 40
 
@@ -105,6 +113,51 @@ def summary_style_label(style: str) -> str:
     }.get(style, style)
 
 
+def frame_directory_name(note_stem: str) -> str:
+    """插图目录名：空格换成连字符，去掉链接里有歧义的字符。
+
+    目录名带空格时，Markdown 里的图片只能写成 ``![](<./带 空格/a.jpg>)`` 这种尖括号
+    形式，不少渲染器（终端预览、部分编辑器）认不出来，图片于是一张都不显示。
+    """
+    cleaned = "".join(
+        "-" if char.isspace() else char
+        for char in note_stem
+        if char not in '()[]<>#?%&"\\'
+    )
+    return f"{cleaned or 'video'}.frames"
+
+
+def image_markdown(caption: str, frames_dir_name: str, filename: str) -> str:
+    """一张正文插图：路径里没有空格与括号，任何 Markdown 渲染器都能直接解析。"""
+    return f"![{caption}](./{frames_dir_name}/{filename})"
+
+
+def without_images(text: str) -> str:
+    """去掉正文插图，得到纯文字 Markdown。
+
+    图片仍留在 ``.frames/`` 与同名 HTML 里：HTML 是看图的那份，Markdown 只留文字，
+    适合 grep、归档和再加工。
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if FRAME_IMAGE_LINE_RE.match(line.strip()):
+            continue
+        if line.strip() == GALLERY_HEADING and _blank_until_footer(lines, index + 1):
+            continue
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip() + "\n"
+
+
+def _blank_until_footer(lines: Sequence[str], start: int) -> bool:
+    """这个标题后面是不是只剩空行（到页脚或文件结尾）：是就说明它已经是空节。"""
+    for line in lines[start:]:
+        stripped = line.strip()
+        if stripped:
+            return stripped == "---"
+    return True
+
+
 def append_screenshot_section(
     summary: str,
     frames_dir_name: str,
@@ -113,9 +166,9 @@ def append_screenshot_section(
     """Append a Markdown gallery for notes where the model used no inline frames."""
     lines = ["## 视频截图", ""]
     for frame in frames:
-        label = f"截图 {frame.timestamp}"
+        label = f"截图 {frame.span_label}"
         lines.append(
-            f"![{label}](<./{frames_dir_name}/{frame.filename}>)"
+            image_markdown(label, frames_dir_name, frame.filename)
         )
         lines.append("")
     return summary.rstrip() + "\n\n" + "\n".join(lines).rstrip() + "\n"
@@ -125,26 +178,124 @@ def resolve_frame_placeholders(
     text: str,
     frames_dir_name: str,
     frames: Sequence[VideoFrame],
-) -> tuple[str, set[str]]:
-    """Turn ``[[图片 0003：说明]]`` markers into inline Markdown images.
+) -> tuple[str, set[str], list[str]]:
+    """把 ``[[图片 0003：说明]]`` 换成正文插图，并核对图是否落在所在小节的时间区间内。
 
-    Unknown ids and repeated uses of the same frame are dropped, so the note only
-    points at images that exist and each picture appears once. Returns the new
-    text and the ids that were actually placed.
+    编号不存在、重复引用、越界这几种情况都会记进第三个返回值（issues），不再静默
+    消失；越界的图先换成本小节里第一张没用过的画面，换不到才删。返回新文本、
+    实际用到的编号、以及需要报告的问题。
     """
     by_id = {frame.frame_id: frame for frame in frames}
     used: set[str] = set()
+    issues: list[str] = []
+    section_count = 0
+    active_section: int | None = None
+    section_spans: dict[int, tuple[float, float]] = {}
+    section_images: dict[int, int] = {}
+    section_lines: dict[int, int] = {}
+    block_span: tuple[float, float] | None = None
+
+    def pick(span: tuple[float, float]) -> VideoFrame | None:
+        """取这段区间里最能代表它的一张画面：起点落在段内的优先，其次才看区间覆盖。"""
+        inside = [
+            frame
+            for frame in frames
+            if frame.frame_id not in used and span[0] <= frame.seconds <= span[1]
+        ]
+        if inside:
+            return inside[0]
+        return next(
+            (
+                frame
+                for frame in frames
+                if frame.frame_id not in used and frame.covers(*span)
+            ),
+            None,
+        )
 
     def replace(match: re.Match[str]) -> str:
         frame = by_id.get(f"{int(match.group(1)):04d}")
-        if frame is None or frame.frame_id in used:
+        caption = _clean_frame_caption(match.group(2))
+        if frame is None:
+            issues.append(
+                f"笔记引用了不存在的截图 {match.group(1)}，已删除该处插图"
+            )
             return ""
+        if frame.frame_id in used:
+            issues.append(f"截图 {frame.frame_id} 被重复引用，只保留第一次")
+            return ""
+        if block_span is not None and not frame.covers(*block_span):
+            alternative = pick(block_span)
+            where = (
+                f"第 {active_section} 个小节 {_span_label(block_span)} 的插图"
+                f" {frame.frame_id}（{frame.span_label}）越界"
+            )
+            if alternative is None:
+                issues.append(f"{where}，且本小节没有可用截图，已删除")
+                return ""
+            issues.append(
+                f"{where}，已改用 {alternative.frame_id}"
+                f"（{alternative.span_label}）"
+                + (f"，原说明“{caption}”不再适用" if caption else "")
+            )
+            frame = alternative
+            # 换图后原说明描述的是另一张画面，改用这张图自身的时间区间。
+            caption = ""
         used.add(frame.frame_id)
-        caption = _clean_frame_caption(match.group(2)) or f"画面 {frame.timestamp}"
-        return f"![{caption}](<./{frames_dir_name}/{frame.filename}>)"
+        if active_section is not None:
+            section_images[active_section] = (
+                section_images.get(active_section, 0) + 1
+            )
+        caption = caption or f"画面 {frame.span_label}"
+        return image_markdown(caption, frames_dir_name, frame.filename)
 
-    resolved = FRAME_PLACEHOLDER_RE.sub(replace, text)
-    return resolved, used
+    lines: list[str] = []
+    for line in text.splitlines():
+        heading = line.lstrip()
+        if heading.startswith("#"):
+            span = NOTE_BLOCK_SPAN_RE.search(heading)
+            block_span = (
+                (parse_timestamp(span.group(1)), parse_timestamp(span.group(2)))
+                if span
+                else None
+            )
+            if block_span is None:
+                active_section = None
+            else:
+                section_count += 1
+                active_section = section_count
+                section_spans[section_count] = block_span
+                section_lines[section_count] = len(lines)
+        lines.append(FRAME_PLACEHOLDER_RE.sub(replace, line))
+    filled: list[int] = []
+    for index in sorted(section_spans, reverse=True):
+        if section_images.get(index):
+            continue
+        span = section_spans[index]
+        frame = pick(span)
+        if frame is None:
+            continue
+        used.add(frame.frame_id)
+        section_images[index] = 1
+        anchor = section_lines[index] + 1
+        lines[anchor:anchor] = [
+            "",
+            image_markdown(
+                f"画面 {frame.span_label}", frames_dir_name, frame.filename
+            ),
+        ]
+        filled.append(index)
+    if filled:
+        labels = "、".join(
+            f"第 {index} 个（{_span_label(section_spans[index])}）"
+            for index in sorted(filled)
+        )
+        issues.append("以下小节模型没写插图，已自动补上该段第一张画面：" + labels)
+    return "\n".join(lines), used, issues
+
+
+def _span_label(span: tuple[float, float]) -> str:
+    return f"[{format_timestamp(span[0])}-{format_timestamp(span[1])}]"
 
 
 def _clean_frame_caption(value: str | None) -> str:

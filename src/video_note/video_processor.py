@@ -825,6 +825,7 @@ class VideoProcessor:
         cookie: dict[str, str] | None = None,
         should_abort: Callable[[], bool] | None = None,
         notes: list[str] | None = None,
+        media_name: str = "preview",
     ) -> Path:
         """Download a low-resolution video for screenshot extraction."""
         task_dir = self._task_dir(task_id)
@@ -842,14 +843,14 @@ class VideoProcessor:
                     cookie,
                     cookie_domain=self._cookie_domain_for_url(url),
                     format="worstvideo[height>=360]/bestvideo[height<=720]/worst",
-                    outtmpl=str(task_dir / "preview.%(ext)s"),
+                    outtmpl=str(task_dir / f"{media_name}.%(ext)s"),
                     noplaylist=True,
                     **extra,
                 ) as ydl:
                     ydl.extract_info(url, download=True)
                 matches = [
                     item
-                    for item in task_dir.glob("preview.*")
+                    for item in task_dir.glob(f"{media_name}.*")
                     if item.suffix not in {".part", ".ytdl"}
                 ]
                 if matches:
@@ -859,7 +860,7 @@ class VideoProcessor:
                 if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
                     return self._download_bilibili_media_via_api(
                         url,
-                        task_dir / "preview.m4s",
+                        task_dir / f"{media_name}.m4s",
                         cookie,
                         "video",
                         should_abort,
@@ -873,7 +874,9 @@ class VideoProcessor:
             media_url = info.get("_douyin_video_url")
             if not media_url:
                 raise RuntimeError("抖音未返回可下载视频地址")
-            return self._download_direct_media(media_url, task_dir / "preview.mp4", url, cookie)
+            return self._download_direct_media(
+                media_url, task_dir / f"{media_name}.mp4", url, cookie
+            )
 
         return await asyncio.to_thread(_download)
 

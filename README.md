@@ -10,8 +10,8 @@
 - 取字顺序：平台字幕 → B 站 AI 字幕（需 Cookie）→ 本地语音转写。
 - 本地转写：faster-whisper（默认 `base`），也支持中文 CPU 更快的 `paraformer-zh`。
 - B 站：AI 字幕、多分 P 合并、`b23.tv` 短链、视频页 412 时回退开放接口。
-- 笔记：详细 / 忠实复原 / 精简三种风格；长转录按时间顺序分段写完整，不预先压成摘要。
-- 图文：默认按间隔抽帧，把画面和时间点一起发给视觉模型，由模型决定插在哪段正文之后；幻灯片、图表、代码、演示操作会成为正文里的图片，而不是全部堆在末尾。
+- 笔记：详细 / 忠实复原 / 精简三种风格；终稿装不进一次成稿额度、或视频超过 10 分钟时自动分段直写（按时间顺序写完整，不预先压成摘要，每段都有尾部核对）。
+- 图文：默认按画面切换切分视频，一段画面留一张代表帧，把画面和它覆盖的时间段一起发给视觉模型，由模型决定插在哪段正文之后；幻灯片、图表、代码、演示操作会成为正文里的图片，而不是全部堆在末尾。
 - 输出：Markdown 笔记，以及带时间轴的 Markdown / JSON / SRT 转录稿。
 - 复用：同一输入重复运行会复用已缓存的转录；也可以直接从已有转录稿重新生成笔记。
 - 无需 Key：`--transcript-only` 只取字幕/转写，全程不调用大模型。
@@ -80,7 +80,7 @@ dir = "~/notes/video"
 
 [screenshots]
 enabled = true         # 抽帧并把画面插进正文（需要支持图片输入的模型）
-interval = 30          # 抽帧间隔（秒），5-300
+interval = 30          # 画面切分的最小间隔（秒），5-300
 ```
 
 ### API Key 从哪来
@@ -120,7 +120,7 @@ api_key_env = "provider"  # 环境变量名；"provider" = 该 provider 的惯�
 | `VIDEO_NOTE_DEVICE` | `cpu` / `cuda` |
 | `VIDEO_NOTE_OUTPUT_DIR` | 输出目录 |
 | `VIDEO_NOTE_SCREENSHOTS` | `1` / `0`，是否抽帧 |
-| `VIDEO_NOTE_SCREENSHOT_INTERVAL` | 抽帧间隔（秒） |
+| `VIDEO_NOTE_SCREENSHOT_INTERVAL` | 画面切分的最小间隔（秒） |
 | `BILI_SESSDATA` / `BILI_JCT` / `BILI_BUVID3` | B 站 Cookie |
 | `WHISPER_CACHE_DIR` | 模型缓存目录 |
 | `HF_ENDPOINT` | 模型下载源，默认 `https://hf-mirror.com` |
@@ -206,10 +206,13 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `--device cpu\|cuda` | 转写设备 |
 | `--provider/--base-url/--model/--api-key/--token-plan-key` | 临时覆盖模型配置 |
 | `--cookie-file FILE` | Netscape 格式 cookies.txt |
+| `--md-only` | 只写 Markdown，不生成 HTML |
+| `--html-only` | 只写 HTML（图片内联），不写 Markdown |
+| `--md-images / --no-md-images` | Markdown 里是否保留插图（默认去掉，图片只在 HTML 与 `.frames/` 里） |
 | `--screenshots / --no-screenshots` | 是否抽帧并把画面插进正文（默认开启） |
-| `--screenshot-interval SECONDS` | 抽帧间隔，5-300 秒，默认 30；指定即启用抽帧 |
+| `--screenshot-interval SECONDS` | 画面切换的最短间隔（秒），5-300，默认 30；指定即启用抽帧 |
 | `--reuse / --no-reuse` | 复用已有转录，默认开启 |
-| `--clean` | 完成后清理缓存音频、预览视频和截图缓存 |
+| `--clean` | 完成后清理缓存音频、预览视频与旧版截图缓存（产物目录不动） |
 | `--config FILE` | 指定配置文件 |
 | `-v, --verbose` | 失败时打印完整堆栈 |
 
@@ -217,17 +220,18 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 
 默认写到 `~/notes/video`，可在配置文件的 `[output] dir` 修改，也可以用 `VIDEO_NOTE_OUTPUT_DIR` 或 `--out` 临时覆盖：
 
-- 笔记：`<标题>.md`
+- 默认两份都写：**看图用 `.html`，要文字用 `.md`**；只要其中一份就加 `--md-only` 或 `--html-only`
+- 网页版（看图的那份）：`<标题>.html`，图片内联成 data URI，单文件、浏览器双击就能看
+- 笔记（文字的那份）：`<标题>.md`，默认不含插图（`--md-images` 可让它保留相对路径的图片链接）
+- 原始截图：`<标题>.frames/`，抽出的每一段画面都在这里，含区间清单 `frames.json`；缓存里不再放图片
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
-- 截图：`<标题>.frames/frame_0001_30s.jpg`，正文内嵌引用；模型一张都没引用时追加到末尾的 `## 视频截图`
 - B 站分 P：`<标题>-P1,3.md`（转录稿同理）
 - 重名时自动加 `-2`、`-3`
 
 缓存在 `~/.cache/video-note/`：
 
 - `runs/<hash>/audio.*`：下载的音频
-- `runs/<hash>/preview.*`：抽帧用的低清预览视频
-- `runs/<hash>/frames_<间隔>/`：可复用的截图缓存
+- `runs/<hash>/preview.*`：抽帧用的低清预览视频（分 P 视频是 `preview_p<n>.*`，每 P 一份）
 - `runs/<hash>/transcript.json`：可复用的转录
 - `models/`：faster-whisper / paraformer 模型
 
@@ -241,18 +245,29 @@ rm -rf ~/.cache/video-note/runs
 
 开启后（默认 `[screenshots] enabled = true`，命令行 `--screenshots` / `--no-screenshots` 可覆盖）：
 
-- URL：额外下载一份低清预览视频，不下载完整高清视频
+- URL：额外下载一份低清预览视频，不下载完整高清视频；B 站分 P 逐 P 下载，帧时间戳按各 P 时长换算到合并时间轴
 - 本地视频：直接从本地文件抽帧
-- 按 `interval` 秒抽一帧，存到输出目录的 `<标题>.frames/`；本地大分辨率视频会缩到最大宽度 1280
-- 相邻或近期几乎相同的画面只留一张：静态幻灯片不会在正文里重复出现
-- 长视频按段直写，每段只带该时间段的画面，单次请求最多 16 张
-- 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](<./标题.frames/frame_0002_60s.jpg>)`，并且只把正文真正引用的帧复制到 `.frames/`
+- 按画面变化切分视频，一段画面留一张代表帧（最晚的一帧，动画/逐行代码收尾后内容最完整），并记下它持续多长时间
+- 切换要连续两次采样都确认，字幕换行、光标移动、一次按键高亮不会把一张幻灯片拆成几张；两段画面间隔小于 `--screenshot-interval` 时并进下一段
+- 画面被切成时间段，不再是一个孤立时间点：幻灯片在小节开始前就出现、一直讲到段中，也会配给这一节
+- 按段直写时每段只带该时间段的画面，候选最多 16 张；提示词允许的插图数按这段时长给（约 4 分钟一张，单段最多 8 张），避免长段被压成零星两三张
+- 截图直接抽到产物目录的 `<标题>.frames/`（不再进缓存）：HTML 里内联它们，Markdown 默认不带图
+- 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](./标题-frames/frame_0002_60s.jpg)`；写进 Markdown 的版本按 `--md-images` 决定去留
+- 插图目录名不含空格与括号，图片链接因此不需要 `<>` 包裹——终端预览、编辑器、浏览器都能直接解析
+- 插图会按所在小节的时间区间核对：引用了不存在的编号、同一张图重复引用、图不在本节区间内，都会在日志里明确报出来；越界的图先换成本节里第一张没用过的画面（原说明一并弃用，改用这张图自己的时间段），换不到才删除
+- 有带时间区间的小节模型没写插图时，程序会自动补上该段第一张画面（日志里会说明补了哪几节），不靠模型自觉
 - 模型一张都没引用时，退化成笔记末尾的 `## 视频截图` 图库（最多 12 张），保证画面不丢
 - 字幕文件 / `--from-transcript` 输入没有视频画面，会跳过抽帧
 - `--transcript-only` 只输出转录，也会跳过抽帧
-- `--clean` 会清理缓存里的预览视频和截图缓存，但输出目录里已经发布的 `.frames/` 会保留
+- `--clean` 会清理缓存里的音频与预览视频（顺带清掉旧版本留下的 `frames_*` 目录），输出目录里的 `.html` 与 `.frames/` 一律保留
 
-截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新抽帧；换间隔会按新间隔重新抽。`--no-reuse` 可强制重跑。截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
+截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新切帧；换间隔会按新间隔重新切。没有区间清单的旧缓存会重新切一次（否则配图只能按时间点猜）。`--no-reuse` 可强制重跑。截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
+
+**在浏览器里看**：浏览器不渲染 Markdown，双击 `.md` 只会显示纯文本；Markdown 预览扩展默认也不允许读 `file://` 下的相对图片。所以默认同时写一份同名 `.html`（图片内联成 data URI，单文件可随意复制），直接 `xdg-open <标题>.html` 就能看到图文（只要 HTML：`--html-only`；只要文字：`--md-only`）；已有笔记可以单独转换：
+
+```bash
+uv run python -m video_note.html_export ~/notes/video/某个笔记.md
+```
 
 **需要视觉模型。** 画面以 base64 图片随请求发送，模型必须支持图片输入（默认的 `deepseek-flash`、`gpt-4o`、`qwen-vl`、`glm-4v`、Kimi 视觉版等）。模型拒绝图片时程序会在日志里明确报错并提示换模型；只想要文字笔记就加 `--no-screenshots`，纯文本模型照样可用。
 
@@ -375,9 +390,12 @@ video-note 'URL' --transcript-only
 
 - 图文笔记需要支持图片输入的模型：默认的 `deepseek-flash` 就支持，也可换 `MiniMax-M3.1-Flash` / `qwen-vl` / `glm-4v` / `gpt-4o`；`deepseek-v4-pro` 只支持文字，或加 `--no-screenshots` 只写文字
 - `--transcript-only`、字幕文件、`--from-transcript` 没有画面，不会插图
-- 模型认为画面没有信息时可以不插；一张都没插时会在笔记末尾附图
-- 觉得插图太稀：把 `--screenshot-interval` 调小（如 10 秒），让画面更密
-- 抽帧间隔必须在 5-300 秒之间
+- 模型认为画面没有信息时可以不插；一张都没插时会在笔记末尾附图，越界或引用不存在的编号会在日志里报「提示：…」
+- 觉得插图太稀：先看日志里「以下小节有可用截图但正文没用上」——那是模型没插，可以调小 `--screenshot-interval`（如 10 秒）给它更密的候选画面，或改用 `--style faithful`
+- 画面切分的最小间隔必须在 5-300 秒之间
+- 想看图文：开同名 `.html`（浏览器、qutebrowser 都行）。浏览器不渲染 `.md`，而且默认的 Markdown 已按你的要求去掉了插图
+- 想让 Markdown 也带图（给 VS Code / Obsidian 用）：加 `--md-images`
+- 分 P 视频的日志若提示「分 P 时长未知」，说明缓存里没有各 P 时长，截图只能覆盖第 1 个分 P；加 `--no-reuse` 重跑即可
 - 预览视频下载失败时日志会说明，笔记仍会正常生成；可以稍后重试或改用本地视频
 
 **抖音**
@@ -402,8 +420,9 @@ src/video_note/
   bili_cookies.py      cookies.txt 读取
   transcript_files.py  转录稿读写（JSON/Markdown/SRT）
   render.py            笔记头尾、插图占位符解析、文件名、错误文案
-  screenshots.py       PyAV 抽帧与 JPEG 输出
-  video_frames.py      截图模型、按时间段选取、抽稀、去重、视觉接口编码
+  html_export.py       笔记转单文件 HTML（图片内联），也可单独调用
+  screenshots.py       PyAV 逐帧扫描、按画面变化切段、JPEG 输出
+  video_frames.py      截图模型（含覆盖区间）、按区间选取、抽稀、视觉接口编码
   transcript.py        时间轴、切块、质量检查（上游代码）
   video_processor.py   下载、平台字幕、B 站 AI 字幕（上游代码）
   whisper_asr.py       faster-whisper 转写（上游代码）

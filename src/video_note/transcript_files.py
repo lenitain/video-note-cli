@@ -256,9 +256,14 @@ def _parse_clock(value: str) -> float:
 
 
 def unique_note_path(directory: Path, stem: str) -> Path:
+    """同名笔记的可用路径：``.md`` 与 ``.html`` 任一存在就算被占用。
+
+    两个成品可以只写其中一个（``--md-only`` / ``--html-only``），只看 ``.md``
+    会让只写了 HTML 的那次被第二次运行覆盖。
+    """
     candidate = directory / f"{stem}.md"
     index = 2
-    while candidate.exists():
+    while candidate.exists() or candidate.with_suffix(".html").exists():
         candidate = directory / f"{stem}-{index}.md"
         index += 1
     return candidate

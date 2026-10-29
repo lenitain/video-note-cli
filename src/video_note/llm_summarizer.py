@@ -15,6 +15,7 @@ from .transcript import (
     chunk_segments,
     format_timestamp,
     merge_segment_lines,
+    parse_timestamp,
     segments_to_prompt,
 )
 from .video_frames import (
@@ -98,8 +99,12 @@ SUMMARY_CHUNK_CHARACTERS = 9_000
 # 均匀抽稀到该数量，既保留首尾画面，又不会把上下文与账单一起抬上去。
 MAX_FRAMES_PER_REQUEST = 16
 # 提示词允许模型在正文里插几张图：给多少画面由代码决定，插哪几张由模型按内容取舍。
-MAX_INLINE_FRAMES_PER_SECTION = 4
-MAX_INLINE_FRAMES_PER_DRAFT = 6
+# 上限按这段正文覆盖的时长缩放（见 inline_frame_limit）：固定的 4 张对 20 分钟的一段
+# 等于“挑两张就算完”，实测 18 分钟的一段只写出 3 张。
+MAX_INLINE_FRAMES_PER_SECTION = 8
+MAX_INLINE_FRAMES_PER_DRAFT = 8
+# 多长的正文配一张图：约 4 分钟一张，否则幻灯片密的教学视频会被削成零星几张。
+FRAME_SECONDS_PER_INLINE = 240.0
 MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
@@ -151,13 +156,14 @@ TAIL_PATCH_TIMEOUT_SECONDS = 240.0
 # 流式读取心跳间隔：把"模型仍在输出"反映到任务进度上，避免长时间同一句话看起来像死锁。
 # 与转写心跳同节奏（30s）：20s 时日志滚动太快，反而看不清进度。
 LLM_HEARTBEAT_SECONDS = 30.0
-# 转录净字数超过该值时改走“逐段直写成稿”管线（见 ``_write_long_transcript_notes``）。
-# 根因：``_reduce_chunks`` 把成稿可见材料压到恒 ≤ ``MERGE_INPUT_CHARACTERS`` 字、成稿输出
-# 恒 ≤ 4_600 token，两个上限都与视频时长无关。3 小时课（6.2 万字）因此丢约 2 小时内容，
-# 而 37 分钟这一档逐段压缩后本来就 < 14000 字、归并未触发、额度也够用，实测是正常的，
-# 所以阈值以下一律保持原管线，不拿已验证良好的行为去换未验证的路径。
-# 24_000 净字数 ≈ 70~80 分钟口播，是策略选择而非推导值：中长度视频若反馈变差就下调。
-LONG_TRANSCRIPT_CHARACTERS = 24_000
+# 压缩管线的成稿额度：正文与思考链共用一个池子，而且与视频时长无关。
+# 是否装得下取决于终稿要写多长，所以要拿输出预算做路由：估算超过这个额度就得拆段
+# 直写。否则正文会被就地截断，插图标记也跟着停在中途——实测 2 万字转录 / 36 分钟
+# 视频，成稿写到 11:55 就用光 4_600，后半段正文与插图一起丢。
+CONDENSED_DRAFT_TOKENS = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}
+# 超过这个时长的视频一律逐段直写：一次响应把 10 分钟以上的内容写到结尾不可靠，
+# 而逐段直写每段都有自己的尾部核对与续写。
+SECTION_PIPELINE_MAX_SECONDS = 600.0
 # 每段直写的转录净字数预算（时间戳开销不计入，见 chunk_segments 的同名参数）。
 NOTE_SECTION_CHARACTERS = 6_500
 # 提示词内把碎 ASR 行合并到的目标字数：whisper 常切成平均 7.5 字一段，逐行加时间戳会让
@@ -575,7 +581,7 @@ class LLMSummarizer:
 
         await self._report_progress(progress_callback, 2, "正在分析转录内容")
         notes_effort = self._stage_effort(reasoning_effort, style, "notes")
-        if style != "concise" and self._is_long_transcript(segments):
+        if self._needs_section_pipeline(segments, style):
             draft = await self._write_long_transcript_notes(
                 title,
                 segments,
@@ -654,11 +660,9 @@ class LLMSummarizer:
     ) -> str:
         """原有管线：逐段压缩成片段笔记 → 分层归并 → 一次成稿。
 
-        继续服务 concise，以及净字数不超过 ``LONG_TRANSCRIPT_CHARACTERS`` 的短片——这个规模
-        下逐段压缩后的总量本来就小于 ``MERGE_INPUT_CHARACTERS``，归并根本不会触发，实测质量
-        与排版都良好（37 分钟用户重测通过）。**分流阈值**仍守着"不拿已验证的行为去换未验证
-        的路径"；改的是切块之前先合并碎行——不合并时 32 字/段的时间戳开销会把中短视频也切成
-        好几块，每块都押一次有损压缩调用。
+        继续服务 concise，以及额度真能装下、时长也不长的短片——这时逐段压缩后的总量本来
+        就小于 ``MERGE_INPUT_CHARACTERS``，归并根本不会触发，实测质量与排版都良好。
+        什么时候该改走逐段直写由 ``_needs_section_pipeline`` 判断。
         """
         # 先把碎 ASR 行拼成长行再切块。不合并的话每段都要摊上 32 字时间戳开销，
         # whisper 碎到平均 7.5 字一段时开销吃掉 81% 的预算——7 分钟的视频也会被切成
@@ -722,15 +726,15 @@ class LLMSummarizer:
                 for index, note in enumerate(condensed_chunks, start=1)
             )
 
-        max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
-        coverage_end = format_timestamp(segments[-1].end)
+        max_tokens = CONDENSED_DRAFT_TOKENS[style]
+        duration = segments[-1].end
         draft_progress = 78
         draft_stage = "正在生成完整笔记"
         await self._report_progress(progress_callback, draft_progress, draft_stage)
         draft_frames = evenly_sample_frames(frames, MAX_FRAMES_PER_REQUEST)
         draft = await self._complete(
             self._note_prompt(
-                title, source, metadata, style, coverage_end, draft_frames
+                title, source, metadata, style, duration, draft_frames
             ),
             max_tokens=max_tokens,
             effort=notes_effort,
@@ -751,9 +755,32 @@ class LLMSummarizer:
         )
 
     @staticmethod
-    def _is_long_transcript(segments: Sequence[TranscriptSegment]) -> bool:
-        """转录净字数是否超过长视频阈值（时间戳开销不计，见 ``_write_long_transcript_notes``）。"""
-        return sum(len(segment.text) for segment in segments) > LONG_TRANSCRIPT_CHARACTERS
+    def _needs_section_pipeline(
+        segments: Sequence[TranscriptSegment], style: str
+    ) -> bool:
+        """压缩管线的成稿额度装不下终稿时，就必须改走逐段直写。
+
+        终稿长度按转录净字数估：口语转书面笔记保留 ``SECTION_TOKEN_KEEP_RATIO``，
+        每 ``SECTION_TOKENS_PER_CHARACTER`` 字一个 token。用输出预算而不是转录字数
+        做路由，因为卡住正文的从来就是成稿额度（与时长无关），转录字数只是它的近似。
+
+        时长另卡一道：额度装得下不等于模型写得完——一次响应写到中途自行收尾很常见
+        （实测 18 分钟视频停在 13:17，而 detailed 不做尾部补写），而逐段直写每段都有
+        自己的尾部核对。AI 字幕比语音转写稀疏得多（18 分钟只 5 千字），只按字数估算
+        会恰好绕过这条防线。
+        """
+        if style == "concise":
+            return False
+        if segments[-1].end > SECTION_PIPELINE_MAX_SECONDS:
+            return True
+        characters = sum(len(segment.text) for segment in segments)
+        draft_tokens = CONDENSED_DRAFT_TOKENS.get(style)
+        if draft_tokens is None:
+            raise ValueError(f"Unsupported summary style: {style}")
+        estimate = (
+            characters / SECTION_TOKENS_PER_CHARACTER * SECTION_TOKEN_KEEP_RATIO
+        )
+        return estimate > draft_tokens
 
     @staticmethod
     def _mechanical_effort(reasoning_effort: str) -> str:
@@ -1152,6 +1179,15 @@ class LLMSummarizer:
         )
 
     @staticmethod
+    def inline_frame_limit(seconds: float, cap: int) -> int:
+        """这段正文最多插几张图：按时长给，不按固定常数。
+
+        固定的 4 张对 20 分钟的一段等于“挑两张就算完”，而 2 分钟的片段又用不到这么多；
+        图少了正文自然就变成纯文字。
+        """
+        return max(1, min(cap, 1 + int(seconds / FRAME_SECONDS_PER_INLINE)))
+
+    @staticmethod
     def _frames_prompt_block(
         frames: Sequence[VideoFrame], max_inline: int
     ) -> str:
@@ -1159,7 +1195,7 @@ class LLMSummarizer:
         if not frames:
             return ""
         listing = "\n".join(
-            f"图片 {frame.frame_id}｜{frame.timestamp}" for frame in frames
+            f"图片 {frame.frame_id}｜{frame.span_label}" for frame in frames
         )
         return f"""
 视频画面（共 {len(frames)} 张，按清单顺序附在下面，每张图前标注了编号与时间点）：
@@ -1168,9 +1204,10 @@ class LLMSummarizer:
 插图要求：
 - 只在画面本身承载信息时插图：幻灯片、板书、图表、公式、代码、软件操作、实物演示；主讲人出镜、空镜、转场、纯装饰画面一律不插
 - 插图写在对应内容之后，单独一行，写成 [[图片 编号：画面说明]]，例如 [[图片 0003：用双指针扫描已排序数组]]
-- 编号只能取自上面的清单，同一张图只插一次，这段笔记最多插 {max_inline} 张
+- 编号只能取自上面的清单，并且画面的时间段要和所配内容对得上；同一张图只插一次，这段笔记最多插 {max_inline} 张，按内容密度铺开，不要都堆在同一处
+- 清单里有画面支撑的小节就应该配图：讲解原理、波形、寄存器、代码、演示操作的地方别写成纯文字；确实没有对应画面时才留白
 - 画面说明只写画面里看得见的事实（标题、坐标轴、代码作用、演示结果），不超过 30 字，不写“如图所示”，不做推测
-- 一张都不值得插时就不要写这种标记；不要输出图片路径或 ![](...) 语法，程序会把标记换成真正的图片
+- 不要输出图片路径或 ![](...) 语法，程序会把标记换成真正的图片
 """
 
     @staticmethod
@@ -1198,7 +1235,11 @@ class LLMSummarizer:
         )
         brief_block = f"\n{brief}\n" if brief else ""
         frames_block = LLMSummarizer._frames_prompt_block(
-            frames, MAX_INLINE_FRAMES_PER_SECTION
+            frames,
+            LLMSummarizer.inline_frame_limit(
+                section[-1].end - section[0].start,
+                MAX_INLINE_FRAMES_PER_SECTION,
+            ),
         )
         return f"""视频标题：{title}
 这是全片第 {index}/{total} 段，覆盖时间轴 {start} – {end}。直接把这一段写成最终成稿的笔记正文：不要写提纲、不要预告后文、不要总结全片。
@@ -1228,7 +1269,11 @@ class LLMSummarizer:
         frames: Sequence[VideoFrame] = (),
     ) -> str:
         frames_block = LLMSummarizer._frames_prompt_block(
-            frames, MAX_INLINE_FRAMES_PER_SECTION
+            frames,
+            LLMSummarizer.inline_frame_limit(
+                remaining[-1].end - remaining[0].start,
+                MAX_INLINE_FRAMES_PER_SECTION,
+            ),
         )
         return f"""视频《{title}》笔记第 {index}/{total} 段（覆盖到 {end}）已经写到 {covered_ts}，后半部分还没写完。
 
@@ -1442,20 +1487,12 @@ class LLMSummarizer:
         return kept if len(kept) < len(segments) else segments
 
     @staticmethod
-    def _parse_clock(value: str) -> float:
-        """把 [HH:MM:SS] / [MM:SS] 转成秒；两段且分钟超过 99 时按累计分钟处理。"""
-        parts = value.split(":")
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        return int(parts[0]) * 60 + float(parts[1])
-
-    @staticmethod
     def _max_note_timestamp(text: str) -> float | None:
         seconds: list[float] = []
         for match in _NOTE_TIMESTAMP_RE.finditer(text):
-            seconds.append(LLMSummarizer._parse_clock(match.group(1)))
+            seconds.append(parse_timestamp(match.group(1)))
             if match.group(2):
-                seconds.append(LLMSummarizer._parse_clock(match.group(2)))
+                seconds.append(parse_timestamp(match.group(2)))
         return max(seconds) if seconds else None
 
     @staticmethod
@@ -2093,7 +2130,7 @@ class LLMSummarizer:
         source: str,
         metadata: dict[str, Any],
         style: str = "detailed",
-        coverage_end: str | None = None,
+        duration_seconds: float = 0.0,
         frames: Sequence[VideoFrame] = (),
     ) -> str:
         owner = metadata.get("owner") or "未知"
@@ -2119,10 +2156,11 @@ class LLMSummarizer:
                 "首尾时间点；标题之外的段落仅在有助于定位时另加 [MM:SS]，不必每段都加；"
                 "最后一个小节的区间终点必须接近材料末尾，以便核对是否写到视频最后。"
             )
+            coverage_end = format_timestamp(duration_seconds)
             coverage_hint = (
                 f"材料内容一直推进到时间点 {coverage_end}；笔记必须覆盖到该时间点，"
                 "收尾前先自查是否漏掉了材料末尾的话题。"
-                if coverage_end
+                if duration_seconds > 0
                 else ""
             )
         metadata_hint = (
@@ -2133,7 +2171,10 @@ class LLMSummarizer:
         brief = LLMSummarizer._context_brief(metadata)
         brief_block = f"\n{brief}\n" if brief else ""
         frames_block = LLMSummarizer._frames_prompt_block(
-            frames, MAX_INLINE_FRAMES_PER_DRAFT
+            frames,
+            LLMSummarizer.inline_frame_limit(
+                duration_seconds, MAX_INLINE_FRAMES_PER_DRAFT
+            ),
         )
         return f"""{task}
 

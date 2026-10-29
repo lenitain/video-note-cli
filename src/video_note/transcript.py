@@ -27,6 +27,14 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def parse_timestamp(value: str) -> float:
+    """把 ``MM:SS`` / ``HH:MM:SS`` 读回秒；两段且分钟超过 99 时按累计分钟处理。"""
+    parts = value.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    return int(parts[0]) * 60 + float(parts[1])
+
+
 def segments_to_prompt(segments: Sequence[TranscriptSegment]) -> str:
     return "\n".join(
         f"[{format_timestamp(segment.start)}-{format_timestamp(segment.end)}] {segment.text}"

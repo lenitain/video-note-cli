@@ -27,7 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video-note",
         description=(
-            "把视频链接、本地音视频或字幕文件变成带时间轴的 Markdown 笔记。"
+            "把视频链接、本地音视频或字幕文件变成带时间轴的笔记"
+            "（Markdown + 单文件 HTML，图片内联）。"
             "默认先找平台字幕，找不到再用本地模型转写，最后调用大模型写笔记。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -164,7 +165,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="完成后删除缓存里的音频和截图缓存，只保留转录",
+        help="完成后删除缓存里的音频、预览视频与旧版截图缓存，只保留转录",
+    )
+    outputs = parser.add_mutually_exclusive_group()
+    outputs.add_argument(
+        "--md-only",
+        action="store_true",
+        help="只写 Markdown，不生成 HTML",
+    )
+    outputs.add_argument(
+        "--html-only",
+        action="store_true",
+        help="只写 HTML（图片内联），不写 Markdown",
+    )
+    parser.add_argument(
+        "--md-images",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Markdown 里是否也保留插图（默认去掉，图片只在 HTML 和 .frames 里）",
     )
     parser.add_argument(
         "--screenshots",
@@ -176,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--screenshot-interval",
         type=int,
         metavar="SECONDS",
-        help="抽帧间隔，5-300 秒；指定这一项会启用抽帧（默认读取配置）",
+        help="画面切分的最小间隔，5-300 秒；指定这一项会启用抽帧（默认读取配置）",
     )
     parser.add_argument(
         "-v",
@@ -273,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
             clean_media=args.clean,
             screenshots=settings.screenshots.enabled,
             screenshot_interval=settings.screenshots.interval,
+            write_markdown=not args.html_only,
+            write_html=not args.md_only,
+            md_images=args.md_images,
             cookie_file=(
                 Path(args.cookie_file).expanduser()
                 if args.cookie_file
@@ -307,8 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         f"完成：{result.title}（{result.segments} 段，"
         f"{result.source}，{result.duration:.1f} 秒）"
     )
-    if result.note_path is not None:
-        print(result.note_path)
+    for note_file in result.note_files:
+        print(note_file)
     for path in result.transcript_paths.values():
         print(path)
     return 0
