@@ -180,11 +180,14 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --cookie-file ~/cookies.txt
 # 生成笔记时顺便把转录稿也放到输出目录
 video-note 'https://www.bilibili.com/video/BVxxxx' --save-transcript
 
+# 改成每 10 秒抽一帧，画面更密（抽帧开关与间隔各管各的）
+video-note ./lecture.mp4 --screenshots --screenshot-interval 10
+
+# 同一份正文出两件 Markdown：一件带图、一件纯文字
+video-note 'https://www.bilibili.com/video/BVxxxx' --md-image --md-noimage
+
 # 纯文本模型：关掉抽帧，只写文字笔记
 video-note 'https://www.bilibili.com/video/BVxxxx' --no-screenshots
-
-# 改成每 10 秒抽一帧，画面更密
-video-note ./lecture.mp4 --screenshot-interval 10
 
 # 完成后删除缓存里的音频和截图缓存，只保留转录
 video-note 'https://www.bilibili.com/video/BVxxxx' --clean
@@ -197,7 +200,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `-o, --out DIR` | 输出目录 |
 | `--style detailed\|faithful\|concise` | 笔记风格，默认 `detailed` |
 | `--effort auto\|off\|high\|max` | 推理强度，默认 `auto`；`max` 按 `high` 处理 |
-| `-t, --transcript-only` | 只做转录，不调用大模型 |
+| `-t, --transcript-only` | 只做转录，不调用大模型；与成品开关同用会报错 |
 | `--save-transcript` | 生成笔记时同时保存转录稿 |
 | `--from-transcript FILE` | 从 `.json/.srt/.vtt/.md/.txt` 转录稿开始 |
 | `--no-subtitles` | 不读平台字幕，强制语音转写 |
@@ -206,11 +209,11 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `--device cpu\|cuda` | 转写设备 |
 | `--provider/--base-url/--model/--api-key/--token-plan-key` | 临时覆盖模型配置 |
 | `--cookie-file FILE` | Netscape 格式 cookies.txt |
-| `--md-only` | 只写 Markdown，不生成 HTML |
-| `--html-only` | 只写 HTML（图片内联），不写 Markdown |
-| `--md-images / --no-md-images` | Markdown 里是否保留插图（默认去掉，图片只在 HTML 与 `.frames/` 里） |
+| `--md-noimage` | 写纯文字 Markdown（去掉插图行）：`<标题>.md` |
+| `--md-image` | 写带插图的 Markdown（相对路径引用 `<标题>.frames/`）：`<标题>.images.md` |
+| `--html` | 写单文件 HTML（图片内联成 data URI）：`<标题>.html` |
 | `--screenshots / --no-screenshots` | 是否抽帧并把画面插进正文（默认开启） |
-| `--screenshot-interval SECONDS` | 画面切换的最短间隔（秒），5-300，默认 30；指定即启用抽帧 |
+| `--screenshot-interval SECONDS` | 画面切换的最短间隔（秒），5-300，默认 30；只设间隔，是否抽帧看 `--screenshots` |
 | `--reuse / --no-reuse` | 复用已有转录，默认开启 |
 | `--clean` | 完成后清理缓存音频、预览视频与旧版截图缓存（产物目录不动） |
 | `--config FILE` | 指定配置文件 |
@@ -220,9 +223,10 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 
 默认写到 `~/notes/video`，可在配置文件的 `[output] dir` 修改，也可以用 `VIDEO_NOTE_OUTPUT_DIR` 或 `--out` 临时覆盖：
 
-- 默认两份都写：**看图用 `.html`，要文字用 `.md`**；只要其中一份就加 `--md-only` 或 `--html-only`
+- 三件成品各管各的，可以任意组合：**看图用 `.html`，要文字用 `.md`，想给编辑器带图就再加 `.images.md`**；三个都不指定时默认写纯文字 Markdown 和 HTML（等于 `--md-noimage --html`）
 - 网页版（看图的那份）：`<标题>.html`，图片内联成 data URI，单文件、浏览器双击就能看
-- 笔记（文字的那份）：`<标题>.md`，默认不含插图（`--md-images` 可让它保留相对路径的图片链接）
+- 笔记（文字的那份）：`<标题>.md`，不含插图
+- 笔记（带图的那份）：`<标题>.images.md`，用相对路径引用 `<标题>.frames/` 里的图片；两个 Markdown 开关同时给，就各出一份、名字互不覆盖
 - 原始截图：`<标题>.frames/`，抽出的每一段画面都在这里，含区间清单 `frames.json`；缓存里不再放图片
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
 - B 站分 P：`<标题>-P1,3.md`（转录稿同理）
@@ -252,7 +256,7 @@ rm -rf ~/.cache/video-note/runs
 - 画面被切成时间段，不再是一个孤立时间点：幻灯片在小节开始前就出现、一直讲到段中，也会配给这一节
 - 按段直写时每段只带该时间段的画面，候选最多 16 张；提示词允许的插图数按这段时长给（约 4 分钟一张，单段最多 8 张），避免长段被压成零星两三张
 - 截图直接抽到产物目录的 `<标题>.frames/`（不再进缓存）：HTML 里内联它们，Markdown 默认不带图
-- 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](./标题-frames/frame_0002_60s.jpg)`；写进 Markdown 的版本按 `--md-images` 决定去留
+- 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](./标题-frames/frame_0002_60s.jpg)`；两件 Markdown 成品里，`<标题>.md` 去掉插图行，`<标题>.images.md` 保留
 - 插图目录名不含空格与括号，图片链接因此不需要 `<>` 包裹——终端预览、编辑器、浏览器都能直接解析
 - 插图会按所在小节的时间区间核对：引用了不存在的编号、同一张图重复引用、图不在本节区间内，都会在日志里明确报出来；越界的图先换成本节里第一张没用过的画面（原说明一并弃用，改用这张图自己的时间段），换不到才删除
 - 有带时间区间的小节模型没写插图时，程序会自动补上该段第一张画面（日志里会说明补了哪几节），不靠模型自觉
@@ -263,7 +267,7 @@ rm -rf ~/.cache/video-note/runs
 
 截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新切帧；换间隔会按新间隔重新切。没有区间清单的旧缓存会重新切一次（否则配图只能按时间点猜）。`--no-reuse` 可强制重跑。截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
 
-**在浏览器里看**：浏览器不渲染 Markdown，双击 `.md` 只会显示纯文本；Markdown 预览扩展默认也不允许读 `file://` 下的相对图片。所以默认同时写一份同名 `.html`（图片内联成 data URI，单文件可随意复制），直接 `xdg-open <标题>.html` 就能看到图文（只要 HTML：`--html-only`；只要文字：`--md-only`）；已有笔记可以单独转换：
+**在浏览器里看**：浏览器不渲染 Markdown，双击 `.md` 只会显示纯文本；Markdown 预览扩展默认也不允许读 `file://` 下的相对图片。所以默认同时写一份同名 `.html`（图片内联成 data URI，单文件可随意复制），直接 `xdg-open <标题>.html` 就能看到图文（只要 HTML：`--html`；只要文字：`--md-noimage`）；已有笔记可以单独转换：
 
 ```bash
 uv run python -m video_note.html_export ~/notes/video/某个笔记.md
@@ -394,7 +398,7 @@ video-note 'URL' --transcript-only
 - 觉得插图太稀：先看日志里「以下小节有可用截图但正文没用上」——那是模型没插，可以调小 `--screenshot-interval`（如 10 秒）给它更密的候选画面，或改用 `--style faithful`
 - 画面切分的最小间隔必须在 5-300 秒之间
 - 想看图文：开同名 `.html`（浏览器、qutebrowser 都行）。浏览器不渲染 `.md`，而且默认的 Markdown 已按你的要求去掉了插图
-- 想让 Markdown 也带图（给 VS Code / Obsidian 用）：加 `--md-images`
+- 想让 Markdown 也带图（给 VS Code / Obsidian 用）：加 `--md-image`，会多出 `<标题>.images.md`，纯文字那份不受影响
 - 分 P 视频的日志若提示「分 P 时长未知」，说明缓存里没有各 P 时长，截图只能覆盖第 1 个分 P；加 `--no-reuse` 重跑即可
 - 预览视频下载失败时日志会说明，笔记仍会正常生成；可以稍后重试或改用本地视频
 

@@ -103,20 +103,19 @@ def render_note_html(markdown_text: str, base_dir: Path, title: str = "") -> str
     )
 
 
-def write_note_html(note_path: Path, markdown_text: str | None = None) -> Path:
-    """在笔记旁边写一份同名 HTML，返回它的路径。
+def write_note_html(html_path: Path, markdown_text: str | None = None) -> Path:
+    """把 Markdown 写成单文件 HTML，落在 ``html_path`` 并返回它。
 
-    ``markdown_text`` 用来喂"带图版本"：落盘的 Markdown 可能是去掉插图的纯文字版，
-    而 HTML 需要带图片链接的那份。
+    ``markdown_text`` 用来喂“带图版本”：落盘的 Markdown 可能是去掉插图的纯文字版，
+    而 HTML 需要带图片链接的那份；省略时读同主干的 ``.md``。
     """
     text = (
         markdown_text
         if markdown_text is not None
-        else note_path.read_text(encoding="utf-8")
+        else html_path.with_suffix(".md").read_text(encoding="utf-8")
     )
-    html_path = note_path.with_suffix(".html")
     html_path.write_text(
-        render_note_html(text, note_path.parent), encoding="utf-8"
+        render_note_html(text, html_path.parent), encoding="utf-8"
     )
     return html_path
 
@@ -170,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"找不到文件：{path}", file=sys.stderr)
             failed += 1
             continue
-        print(write_note_html(path))
+        print(write_note_html(path.with_suffix(".html")))
     return 1 if failed else 0
 
 

@@ -255,16 +255,37 @@ def _parse_clock(value: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def unique_note_path(directory: Path, stem: str) -> Path:
-    """同名笔记的可用路径：``.md`` 与 ``.html`` 任一存在就算被占用。
+NOTE_TEXT_SUFFIX = ".md"
+NOTE_IMAGE_SUFFIX = ".images.md"
+NOTE_HTML_SUFFIX = ".html"
 
-    两个成品可以只写其中一个（``--md-only`` / ``--html-only``），只看 ``.md``
-    会让只写了 HTML 的那次被第二次运行覆盖。
+
+def note_output_paths(directory: Path, stem: str) -> dict[str, Path]:
+    """一份笔记的三件成品：纯文字 Markdown、带图 Markdown、单文件 HTML。
+
+    文件名只由主干和固定后缀决定（``<stem>.md``、``<stem>.images.md``、
+    ``<stem>.html``），并与插图目录 ``<stem>.frames/`` 同主干成套。写哪几件由
+    命令行各自决定，互不改名、互不占用。
     """
-    candidate = directory / f"{stem}.md"
+    return {
+        "text": directory / f"{stem}{NOTE_TEXT_SUFFIX}",
+        "images": directory / f"{stem}{NOTE_IMAGE_SUFFIX}",
+        "html": directory / f"{stem}{NOTE_HTML_SUFFIX}",
+    }
+
+
+def unique_note_stem(directory: Path, stem: str) -> str:
+    """没被占用的笔记主干：三件成品里任何一个已存在就换 ``-2``、``-3``。
+
+    成品可以只写其中一两件，只看 ``.md`` 会让只写了 HTML 的那次被覆盖。
+    """
+    suffixes = (NOTE_TEXT_SUFFIX, NOTE_IMAGE_SUFFIX, NOTE_HTML_SUFFIX)
+    candidate = stem
     index = 2
-    while candidate.exists() or candidate.with_suffix(".html").exists():
-        candidate = directory / f"{stem}-{index}.md"
+    while any(
+        (directory / f"{candidate}{suffix}").exists() for suffix in suffixes
+    ):
+        candidate = f"{stem}-{index}"
         index += 1
     return candidate
 

@@ -49,8 +49,9 @@ from .transcript import TranscriptSegment, format_timestamp, transcript_quality
 from .transcript_files import (
     LoadedTranscript,
     load_transcript_artifact,
+    note_output_paths,
     transcript_source_label,
-    unique_note_path,
+    unique_note_stem,
     unique_transcript_stem,
     write_transcript_artifacts,
 )
@@ -93,9 +94,9 @@ class RunOptions:
     clean_media: bool = False
     screenshots: bool = False
     screenshot_interval: int = 30
-    write_markdown: bool = True
+    write_markdown_text: bool = True
+    write_markdown_images: bool = False
     write_html: bool = True
-    md_images: bool = False
     cookie_file: Path | None = None
 
 
@@ -254,11 +255,12 @@ async def run_video_note_pipeline(
         )
         _check_quality(bundle, options)
 
-        # 笔记路径先定下来：插图要直接抽到产物目录里的 <笔记>.frames，不再经过缓存。
-        note_path = (
+        # 笔记主干先定下来：插图要直接抽到产物目录里的 <笔记>.frames，不再经过缓存。
+        # 几件成品共用同一个主干，各自的名字因此互不影响。
+        note_stem = (
             None
             if options.transcript_only
-            else unique_note_path(
+            else unique_note_stem(
                 options.output_dir,
                 artifact_stem(resolved.title, resolved.info, "note"),
             )
@@ -271,7 +273,7 @@ async def run_video_note_pipeline(
             elif resolved.kind in {"subtitle", "transcript"}:
                 log("当前输入没有视频画面，跳过截图")
             else:
-                assert note_path is not None
+                assert note_stem is not None
                 frames = await _prepare_screenshots(
                     resolved,
                     options,
@@ -280,7 +282,7 @@ async def run_video_note_pipeline(
                     cookies,
                     cancel,
                     bundle.segments,
-                    _frames_directory(options.output_dir, note_path.stem),
+                    _frames_directory(options.output_dir, note_stem),
                 )
 
         if options.transcript_only:
@@ -302,9 +304,9 @@ async def run_video_note_pipeline(
             )
 
         assert summarizer is not None
-        assert note_path is not None
+        assert note_stem is not None
         note_files, transcript_paths = await _generate_note(
-            note_path,
+            note_stem,
             resolved,
             bundle,
             options,
@@ -990,7 +992,7 @@ def _write_transcript_output(
 
 
 async def _generate_note(
-    note_path: Path,
+    note_stem: str,
     resolved: ResolvedInput,
     bundle: TranscriptBundle,
     options: RunOptions,
@@ -1000,6 +1002,7 @@ async def _generate_note(
     frames: Sequence[VideoFrame],
 ) -> tuple[list[Path], dict[str, Path]]:
     options.output_dir.mkdir(parents=True, exist_ok=True)
+    note_paths = note_output_paths(options.output_dir, note_stem)
 
     resolved.info["duration"] = (
         resolved.info.get("duration") or bundle.duration
@@ -1077,17 +1080,20 @@ async def _generate_note(
         summarizer.model,
         options.style,
     )
-    # 同一份内容出两件成品：Markdown 默认只留文字，HTML 带着图（图片内联）。
+    # 三件成品各写各的：带图 Markdown、纯文字 Markdown、单文件 HTML。
+    # 同一份正文，带图的用原样，纯文字的去掉插图行。
     note_files: list[Path] = []
-    if options.write_markdown:
-        note_path.write_text(
-            summary if options.md_images else without_images(summary),
-            encoding="utf-8",
+    if options.write_markdown_text:
+        note_paths["text"].write_text(
+            without_images(summary), encoding="utf-8"
         )
-        note_files.append(note_path)
+        note_files.append(note_paths["text"])
+    if options.write_markdown_images:
+        note_paths["images"].write_text(summary, encoding="utf-8")
+        note_files.append(note_paths["images"])
     if options.write_html:
         try:
-            note_files.append(write_note_html(note_path, summary))
+            note_files.append(write_note_html(note_paths["html"], summary))
         except OSError as exc:
             log(f"HTML 导出失败：{exc}")
 
@@ -1097,7 +1103,7 @@ async def _generate_note(
             resolved,
             bundle,
             options,
-            stem=f"{note_path.stem}.transcript",
+            stem=f"{note_stem}.transcript",
         )
     return note_files, transcript_paths
 

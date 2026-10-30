@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  video-note ./lecture.mp4 --transcript-only\n"
             "  video-note ./lecture.srt --style concise\n"
             "  video-note --from-transcript ./lecture.transcript.json --style detailed\n"
+            "  video-note 'https://www.bilibili.com/video/BV1xx' "
+            "--md-image --md-noimage   # 带图与纯文字各一份\n"
             "\n"
             f"配置文件：{user_config_path()}\n"
         ),
@@ -74,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-transcript",
         action="store_true",
-        help="生成笔记时，同时把转录稿写到输出目录",
+        help="生成笔记时，同时把转录稿写到输出目录（与下面几件成品无关）",
     )
     parser.add_argument(
         "--from-transcript",
@@ -167,22 +169,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="完成后删除缓存里的音频、预览视频与旧版截图缓存，只保留转录",
     )
-    outputs = parser.add_mutually_exclusive_group()
-    outputs.add_argument(
-        "--md-only",
-        action="store_true",
-        help="只写 Markdown，不生成 HTML",
+    outputs = parser.add_argument_group(
+        "成品（可任意组合，都不指定时默认 --md-noimage --html）"
     )
     outputs.add_argument(
-        "--html-only",
+        "--md-noimage",
         action="store_true",
-        help="只写 HTML（图片内联），不写 Markdown",
+        help="写纯文字 Markdown（去掉插图行）：<标题>.md",
     )
-    parser.add_argument(
-        "--md-images",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Markdown 里是否也保留插图（默认去掉，图片只在 HTML 和 .frames 里）",
+    outputs.add_argument(
+        "--md-image",
+        action="store_true",
+        help="写带插图的 Markdown（相对路径引用 <标题>.frames/）：<标题>.images.md",
+    )
+    outputs.add_argument(
+        "--html",
+        action="store_true",
+        help="写单文件 HTML（图片内联成 data URI）：<标题>.html",
     )
     parser.add_argument(
         "--screenshots",
@@ -194,7 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--screenshot-interval",
         type=int,
         metavar="SECONDS",
-        help="画面切分的最小间隔，5-300 秒；指定这一项会启用抽帧（默认读取配置）",
+        help=(
+            "画面切分的最小间隔，5-300 秒（默认读取配置）；"
+            "只设间隔，抽帧开关看 --screenshots"
+        ),
     )
     parser.add_argument(
         "-v",
@@ -249,15 +255,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.input and not args.from_transcript:
         parser.error("请提供视频链接/本地文件，或使用 --from-transcript")
+    note_outputs = (args.md_noimage, args.md_image, args.html)
+    if args.transcript_only and any(note_outputs):
+        parser.error(
+            "-t/--transcript-only 只写转录稿，不写笔记；"
+            "要笔记就去掉 -t，要么去掉 --md-noimage/--md-image/--html"
+        )
+    # 一件成品都没点名时，照旧写纯文字 Markdown 和 HTML。
+    write_markdown_text, write_markdown_images, write_html = (
+        note_outputs if any(note_outputs) else (True, False, True)
+    )
 
     cancel = Cancellation()
     try:
         settings = load_user_settings(
             Path(args.config).expanduser() if args.config else None
         )
-        screenshots = args.screenshots
-        if screenshots is None and args.screenshot_interval is not None:
-            screenshots = True
         settings = apply_cli_overrides(
             settings,
             provider=args.provider,
@@ -270,9 +283,17 @@ def main(argv: list[str] | None = None) -> int:
             asr_model=args.asr,
             device=args.device,
             output_dir=args.out,
-            screenshots=screenshots,
+            screenshots=args.screenshots,
             screenshot_interval=args.screenshot_interval,
         )
+        if (
+            args.screenshot_interval is not None
+            and not settings.screenshots.enabled
+        ):
+            log(
+                f"--screenshot-interval {args.screenshot_interval} "
+                "只在抽帧开启时生效；要抽帧加 --screenshots"
+            )
         options = RunOptions(
             input_value=args.input or "",
             output_dir=output_directory(settings),
@@ -291,9 +312,9 @@ def main(argv: list[str] | None = None) -> int:
             clean_media=args.clean,
             screenshots=settings.screenshots.enabled,
             screenshot_interval=settings.screenshots.interval,
-            write_markdown=not args.html_only,
-            write_html=not args.md_only,
-            md_images=args.md_images,
+            write_markdown_text=write_markdown_text,
+            write_markdown_images=write_markdown_images,
+            write_html=write_html,
             cookie_file=(
                 Path(args.cookie_file).expanduser()
                 if args.cookie_file
