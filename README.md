@@ -27,8 +27,8 @@
 ## 安装
 
 ```bash
-git clone git@github.com:lenitain/video-note-cli ~/.projects/video-note-cli
-cd ~/.projects/video-note-cli
+git clone git@github.com:lenitain/video-note-cli
+cd video-note-cli
 uv sync
 ```
 
@@ -41,6 +41,7 @@ uv run video-note --help
 想在任何目录都用 `video-note`，把虚拟环境里的入口软链到 PATH：
 
 ```bash
+cd <项目目录>              # 例如 ~/video-note-cli
 mkdir -p ~/.local/bin
 ln -sf "$PWD/.venv/bin/video-note" ~/.local/bin/video-note
 ```
