@@ -12,6 +12,8 @@
 3. **切画面**：按画面变化把视频切成片段，每段留一张代表帧（URL 输入会额外下载一份低清预览视频）。
 4. **写笔记**：把转录稿（按时间切段）与该段的画面一起发给视觉模型，产出带时间轴、图文内嵌的 Markdown。
    终稿装不进一次成稿额度、或视频超过 10 分钟时自动分段直写（按时间顺序写完整，不预先压成摘要，每段都有尾部核对）。
+   详细风格末尾追加点评与分析；开了联网核验（`[web]`，默认开）时模型可以联网检索来核验
+   点评里的事实断言并标注来源，检索不到的才标明“模型补充，未联网核验”。
 5. **出成品**：按开关写 Markdown / HTML / 转录稿到本次运行的目录（`<标题>_<开始时间>/`）。
 
 每一步都可以单独跳过：`--transcript-only` 只要转录稿，`--no-screenshots` 不要画面，
@@ -86,6 +88,8 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | `-o, --out DIR` | 输出根目录（默认读取配置，初始为 `~/notes/video`）；每次运行在下面建 `<标题>_<开始时间>/` |
 | `--style detailed\|faithful\|concise` | 笔记风格（默认读取配置，初始为 `detailed`）；详细+点评 / 忠实复原 / 精简 |
 | `--effort auto\|off\|high\|max` | 模型推理强度（默认读取配置，初始为 `auto`）；`max` 按 `high` 处理 |
+| `--web / --no-web` | 点评阶段允许模型联网检索、核验事实并标注来源（默认读取配置，初始为开启） |
+| `--web-backend auto\|baidu\|bing\|duckduckgo\|tavily` | 联网检索后端（默认读取配置）；`auto` 有 Key 用 tavily，否则 baidu 优先、bing 兜底 |
 | `-t, --transcript-only` | 只生成带时间轴的转录稿，不调用大模型、不需要 API Key |
 | `--save-transcript / --no-save-transcript` | 生成笔记时同时把转录稿写到本次运行的目录（默认读取配置，初始为关闭） |
 | `--from-transcript FILE` | 跳过下载和转写，直接从转录稿生成笔记 |
@@ -168,6 +172,14 @@ cookie_file = ""           # 浏览器导出的 Netscape cookies.txt 路径（�
 style = "detailed"         # detailed 详细+点评 / faithful 忠实复原 / concise 精简
 effort = "auto"            # auto / off / high / max（max 按 high 处理）
 
+[web]
+enabled = true             # 点评阶段联网检索、核验事实并标注来源
+backend = "auto"           # auto / baidu / bing / duckduckgo / tavily
+api_key = ""               # tavily 后端的 Key（其他后端不需要）
+api_key_env = ""           # 从环境变量读 Key（如 TAVILY_API_KEY）
+max_searches = 4           # 一次点评最多检索几次
+timeout = 15               # 单次检索超时（秒）
+
 [run]
 reuse = true               # 复用同一输入的已有转录
 save_transcript = false    # 生成笔记时顺带存转录稿
@@ -202,6 +214,10 @@ interval = 30          # 画面切分的最小间隔（秒），5-300
 | `--token-plan-key-env` | `[llm] token_plan_key_env` | — |
 | `--style` | `[note] style` | `VIDEO_NOTE_STYLE` |
 | `--effort` | `[note] effort` | `VIDEO_NOTE_EFFORT` |
+| `--web / --no-web` | `[web] enabled` | `VIDEO_NOTE_WEB` |
+| `--web-backend` | `[web] backend` | `VIDEO_NOTE_WEB_BACKEND` |
+| — | `[web] api_key` / `api_key_env` | `VIDEO_NOTE_WEB_API_KEY` |
+| — | `[web] max_searches` | `VIDEO_NOTE_WEB_MAX_SEARCHES` |
 | `--reuse / --no-reuse` | `[run] reuse` | `VIDEO_NOTE_REUSE` |
 | `--save-transcript / --no-save-transcript` | `[run] save_transcript` | `VIDEO_NOTE_SAVE_TRANSCRIPT` |
 | `--subtitles / --no-subtitles` | `[run] prefer_subtitles` | `VIDEO_NOTE_PREFER_SUBTITLES` |

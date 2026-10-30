@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .llm_summarizer import normalize_provider
+from .web_search import WEB_SEARCH_BACKENDS
 
 APP_NAME = "video-note"
 DEFAULT_OUTPUT_DIR = "~/notes/video"
@@ -101,6 +102,18 @@ class NoteSettings:
 
 
 @dataclass(frozen=True)
+class WebSearchSettings:
+    """点评阶段的联网核验：用什么搜索后端、一次点评搜几次。"""
+
+    enabled: bool = True
+    backend: str = "auto"
+    api_key: str = ""
+    api_key_env: str = ""
+    max_searches: int = 4
+    timeout: int = 15
+
+
+@dataclass(frozen=True)
 class RunSettings:
     """一次运行怎么做：复用旧稿、存转录稿、用哪种字幕、要不要清缓存。"""
 
@@ -118,6 +131,7 @@ class UserSettings:
     output: OutputSettings = field(default_factory=OutputSettings)
     screenshots: ScreenshotSettings = field(default_factory=ScreenshotSettings)
     note: NoteSettings = field(default_factory=NoteSettings)
+    web: WebSearchSettings = field(default_factory=WebSearchSettings)
     run: RunSettings = field(default_factory=RunSettings)
 
 
@@ -135,6 +149,7 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
     output = _output_settings(_section(data, "output"))
     screenshots = _screenshot_settings(_section(data, "screenshots"))
     note = _note_settings(_section(data, "note"))
+    web = _web_settings(_section(data, "web"))
     run = _run_settings(_section(data, "run"))
 
     if provider := _env("VIDEO_NOTE_PROVIDER"):
@@ -197,6 +212,25 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
             ),
         )
 
+    if web_enabled := _env("VIDEO_NOTE_WEB"):
+        web = replace(
+            web,
+            enabled=_parse_bool(web_enabled, "环境变量 VIDEO_NOTE_WEB"),
+        )
+    if web_backend := _env("VIDEO_NOTE_WEB_BACKEND"):
+        web = replace(
+            web,
+            backend=_validate_choice(
+                web_backend, WEB_SEARCH_BACKENDS, "环境变量 VIDEO_NOTE_WEB_BACKEND"
+            ),
+        )
+    if web_api_key := _env("VIDEO_NOTE_WEB_API_KEY"):
+        web = replace(web, api_key=web_api_key)
+    if web_max_searches := _env("VIDEO_NOTE_WEB_MAX_SEARCHES"):
+        web = replace(
+            web, max_searches=_parse_int(web_max_searches, web.max_searches)
+        )
+
     if reuse := _env("VIDEO_NOTE_REUSE"):
         run = replace(run, reuse=_parse_bool(reuse, "环境变量 VIDEO_NOTE_REUSE"))
     if save_transcript := _env("VIDEO_NOTE_SAVE_TRANSCRIPT"):
@@ -226,6 +260,7 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
         output=output,
         screenshots=screenshots,
         note=note,
+        web=web,
         run=run,
     )
 
@@ -254,6 +289,8 @@ class CliOverrides:
     screenshot_interval: int | None = None
     note_style: str | None = None
     note_effort: str | None = None
+    web: bool | None = None
+    web_backend: str | None = None
     reuse: bool | None = None
     save_transcript: bool | None = None
     prefer_subtitles: bool | None = None
@@ -340,6 +377,17 @@ def apply_cli_overrides(
             else settings.note.effort
         ),
     )
+    web = replace(
+        settings.web,
+        enabled=(
+            settings.web.enabled if overrides.web is None else overrides.web
+        ),
+        backend=(
+            overrides.web_backend
+            if overrides.web_backend is not None
+            else settings.web.backend
+        ),
+    )
     run = replace(
         settings.run,
         reuse=(
@@ -375,6 +423,7 @@ def apply_cli_overrides(
         output=output,
         screenshots=screenshot_settings,
         note=note,
+        web=web,
         run=run,
     )
 
@@ -481,6 +530,23 @@ def _note_settings(section: dict[str, Any]) -> NoteSettings:
             NOTE_EFFORTS,
             "配置文件 [note] effort",
         ),
+    )
+
+
+def _web_settings(section: dict[str, Any]) -> WebSearchSettings:
+    return WebSearchSettings(
+        enabled=_config_bool(
+            section, "enabled", True, "配置文件 [web] enabled"
+        ),
+        backend=_validate_choice(
+            _text(section, "backend", "auto") or "auto",
+            WEB_SEARCH_BACKENDS,
+            "配置文件 [web] backend",
+        ),
+        api_key=_text(section, "api_key"),
+        api_key_env=_text(section, "api_key_env"),
+        max_searches=_parse_int(section.get("max_searches", 4), 4),
+        timeout=_parse_int(section.get("timeout", 15), 15),
     )
 
 
@@ -632,7 +698,18 @@ def resolve_credentials(settings: UserSettings) -> UserSettings:
     ``api_key_env = "provider"`` 依赖最终 provider，所以这一步必须晚于命令行覆盖，
     只做一次（pipeline 入口调用）。
     """
-    return replace(settings, llm=_resolve_api_key(settings.llm))
+    return replace(
+        settings,
+        llm=_resolve_api_key(settings.llm),
+        web=_resolve_web_api_key(settings.web),
+    )
+
+
+def _resolve_web_api_key(web: WebSearchSettings) -> WebSearchSettings:
+    """tavily 的 Key：直接写值，或 api_key_env 指认环境变量名。"""
+    if web.api_key or not web.api_key_env:
+        return web
+    return replace(web, api_key=_env(web.api_key_env))
 
 
 def _env(name: str) -> str:

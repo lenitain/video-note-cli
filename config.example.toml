@@ -49,6 +49,23 @@ style = "detailed"
 # auto 会按视频长短自动选档，长视频逐段直写时关思考。
 effort = "auto"
 
+[web]
+# 点评阶段允许模型联网检索、核验事实并标注来源；关闭就退回老行为：
+# 补充知识一律标明“模型补充，未联网核验”。命令行 --web/--no-web 覆盖。
+enabled = true
+# 检索后端：auto / baidu / bing / duckduckgo / tavily。
+# auto 有 Key 用 tavily，否则 baidu 优先、结果为空再试 bing。
+# 命令行 --web-backend 覆盖。
+backend = "auto"
+# tavily 后端的 API Key（其他后端不需要）。置空就是置空；
+# 要用环境变量里的 Key 就写 api_key_env（如 TAVILY_API_KEY）。
+api_key = ""
+api_key_env = ""
+# 一次点评最多检索几次（含模型追加的多轮检索）。
+max_searches = 4
+# 单次检索的超时（秒）。
+timeout = 15
+
 [run]
 # 复用同一输入的已有转录；写 false 就是每次都重新转写。命令行 --reuse/--no-reuse 覆盖。
 reuse = true

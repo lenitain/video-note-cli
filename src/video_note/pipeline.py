@@ -50,6 +50,7 @@ from .settings import (
     OUTPUT_FORMATS,
     PROVIDER_API_KEY_ENV,
     UserSettings,
+    WebSearchSettings,
     model_cache_root,
     resolve_credentials,
     runs_root,
@@ -63,6 +64,7 @@ from .transcript_files import (
     write_transcript_artifacts,
 )
 from .video_frames import VideoFrame, evenly_sample_frames
+from .web_search import WebSearcher
 from .video_processor import (
     BiliPage,
     VideoProcessor,
@@ -238,7 +240,7 @@ async def run_video_note_pipeline(
 
     summarizer: LLMSummarizer | None = None
     if not options.transcript_only:
-        summarizer = build_llm_summarizer(settings.llm)
+        summarizer = build_llm_summarizer(settings.llm, settings.web)
 
     video_processor = VideoProcessor(runs_root())
     cookies = resolve_bilibili_cookies(settings.bilibili, options.cookie_file)
@@ -341,7 +343,9 @@ async def run_video_note_pipeline(
         raise CancelledRun("任务已取消") from exc
 
 
-def build_llm_summarizer(settings: LLMSettings) -> LLMSummarizer:
+def build_llm_summarizer(
+    settings: LLMSettings, web: WebSearchSettings | None = None
+) -> LLMSummarizer:
     """Validate LLM settings early, before a long download or transcription."""
     provider = normalize_provider(settings.provider or "deepseek")
     base_url = settings.base_url.strip() or default_base_url(provider)
@@ -385,9 +389,22 @@ def build_llm_summarizer(settings: LLMSettings) -> LLMSummarizer:
             api_key,
             base_url=base_url or None,
             model=model,
+            web_search=build_web_searcher(web),
         )
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
+
+
+def build_web_searcher(web: WebSearchSettings | None) -> WebSearcher | None:
+    """按 [web] 配置建点评阶段的联网检索器；关闭或没配置就是不联网。"""
+    if web is None or not web.enabled:
+        return None
+    return WebSearcher(
+        backend=web.backend,
+        api_key=web.api_key,
+        timeout=web.timeout,
+        max_searches=web.max_searches,
+    )
 
 
 async def _resolve_input(
@@ -1038,6 +1055,13 @@ async def _generate_note(
         + (f"，Key 来自{source}" if source else "")
     )
     log(f"推理设置：{summarizer.describe_effort(options.effort, options.style)}")
+    if summarizer.web_search is not None:
+        log(
+            f"联网核验：点评阶段可联网检索（后端 {'→'.join(summarizer.web_search.backend_chain)}，"
+            f"一次点评最多 {summarizer.web_search.max_searches} 次）"
+        )
+    else:
+        log("联网核验：关闭（补充知识会标明未联网核验）")
     if frames:
         log(
             f"可用截图：{len(frames)} 张"

@@ -12,6 +12,7 @@
 - 取字顺序：平台字幕 → B 站 AI 字幕（需 Cookie）→ 本地语音转写（faster-whisper 或 paraformer）。
 - 图文：按画面切换切分视频，模型决定每张画面插在哪段正文之后。
 - 输出：Markdown 笔记（纯文字 / 带图两种）、单文件 HTML、带时间轴的转录稿。
+- 联网核验：详细风格的点评允许模型联网检索，核验事实并标注来源；检索不到的才标明“模型补充，未联网核验”。
 - 复用：同一输入重复运行会复用已缓存的转录；也可以直接从已有转录稿重新生成笔记。
 - 无需 Key：`--transcript-only` 只取字幕/转写，全程不调用大模型。
 
@@ -76,7 +77,8 @@ video-note 'https://www.bilibili.com/video/BVxxxx'
 
 产物默认写到 `~/notes/video`，每次运行一个目录 `视频_20251030-143012/`：里面是 `视频.html`（图文，单文件）、`视频.md`（纯文字）、`视频.frames/`（截图）、`视频.transcript.*`（转录稿）。
 
-配置里还能固定这些长期偏好：笔记风格与推理强度（`[note]`）、复用与清缓存（`[run]`）、出哪几件成品（`[output] formats`）、
+配置里还能固定这些长期偏好：笔记风格与推理强度（`[note]`）、点评联网核验（`[web]`，默认开启，`--no-web` 关）、
+复用与清缓存（`[run]`）、出哪几件成品（`[output] formats`）、
 B 站 cookies.txt 路径（`[bilibili] cookie_file`）。命令行同名参数临时盖过它们。
 
 完整参数、配置项、产物布局与故障排查见 **[SPEC.md](SPEC.md)**。
@@ -111,6 +113,7 @@ src/video_note/
   html_export.py       笔记转单文件 HTML（图片内联），也可单独调用
   screenshots.py       PyAV 逐帧扫描、按画面变化切段、JPEG 输出
   video_frames.py      截图模型（含覆盖区间）、按区间选取、抽稀、视觉接口编码
+  web_search.py        联网检索后端（baidu/bing/duckduckgo/tavily），供点评核验
   transcript.py        时间轴、切块、质量检查（上游代码）
   video_processor.py   下载、平台字幕、B 站 AI 字幕（上游代码）
   whisper_asr.py       faster-whisper 转写（上游代码）

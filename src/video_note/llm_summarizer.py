@@ -24,6 +24,12 @@ from .video_frames import (
     frame_data_url,
     frames_in_span,
 )
+from .web_search import (
+    WEB_SEARCH_TOOL,
+    WEB_SEARCH_TOOL_NAME,
+    WebSearcher,
+    search_query_from_arguments,
+)
 
 
 PROVIDER_DEFAULTS = {
@@ -264,7 +270,7 @@ REASONING_PARAM_NAMES = ("thinking", "reasoning_effort", "enable_thinking", "rea
 TOKEN_BUDGET_PARAM_NAMES = ("max_tokens", "max_completion_tokens")
 _DEGRADABLE_PARAM_NAMES = REASONING_PARAM_NAMES + TOKEN_BUDGET_PARAM_NAMES
 _UNSUPPORTED_PARAM_RE = re.compile(
-    r"""["'`](thinking|reasoning_effort|enable_thinking|reasoning|max_tokens|max_completion_tokens)["'`]
+    r"""["'`](thinking|reasoning_effort|enable_thinking|reasoning|max_tokens|max_completion_tokens|tools|tool_choice)["'`]
     [^"',()]{0,40}?\s+(?:is|are|was|were|seems\s+to\s+be)\s+not\s+supported""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -279,10 +285,60 @@ _REJECTED_VALUE_RE = re.compile(
 _REJECTED_REASONING_PARAMS: dict[tuple[str, str, str], set[str]] = {}
 # 参数被拒后的最多降级次数（thinking → reasoning_effort → 不注入）
 MAX_PARAM_RETRIES = 2
+# 拒绝提示里认“参数不可用”的措辞（同时覆盖否认参数名与否认取值两种形状）
+_PARAM_REJECTION_HINTS = (
+    "unsupported_parameter",
+    "not supported",
+    "unsupported parameter",
+    "unknown parameter",
+    "unrecognized",
+    "must be one of",
+    "invalid_value",
+    "invalid value",
+)
+# 工具调用（function calling）相关参数：通道不认它们时整个去掉，退回到不联网的点评
+_TOOL_PARAM_NAMES = ("tools", "tool_choice", "functions", "function_call")
+# 点评阶段联网核验的对话回合上限：模型每回合可以发起 web_search，
+# 累计检索次数另由 WebSearcher.max_searches 把住。
+MAX_TOOL_ROUNDS = 3
 
 def _looks_rate_limited(exc: BaseException) -> bool:
     """这次失败是否像限流/配额（决定逐段直写重试前要不要先等一会）。"""
     return bool(_RATE_LIMIT_RE.search(f"{type(exc).__name__}: {exc}"))
+
+
+def _unsupported_param_names(exc: Exception) -> set[str]:
+    """从报错里认出被通道点名拒绝的参数名（形状见 _rejected_request_params）。
+
+    不能简单“看消息里提到了哪个名字”：拒绝提示会同时推荐另一个参数
+    （"thinking" is not supported ... use "reasoning_effort"），所以只取服务端
+    标出的 param 字段，或引号包住且紧跟拒绝措辞的那个名字。
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if not any(hint in lowered for hint in _PARAM_REJECTION_HINTS):
+        return set()
+    names: set[str] = set()
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and error.get("param"):
+            names.add(str(error["param"]).strip().lower())
+    for pattern in (_UNSUPPORTED_PARAM_RE, _REJECTED_VALUE_RE):
+        names.update(match.group(1).lower() for match in pattern.finditer(text))
+    return names
+
+
+def _rejected_tool_params(exc: Exception, request: dict[str, Any]) -> bool:
+    """这次失败是否在拒绝工具调用参数（通道没有 function calling）。"""
+    if not request.get("tools"):
+        return False
+    names = _unsupported_param_names(exc)
+    if names & set(request) & set(_TOOL_PARAM_NAMES):
+        return True
+    # 没点名参数的形状也认（如 "function calling is not available"）
+    lowered = str(exc).lower()
+    return any(marker in lowered for marker in ("tool", "function call", "function_call"))
 
 
 def looks_like_vision_rejection(exc: BaseException) -> bool:
@@ -394,6 +450,7 @@ class LLMSummarizer:
         api_key: str,
         base_url: str | None = None,
         model: str | None = None,
+        web_search: WebSearcher | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("An API key is required")
@@ -425,6 +482,8 @@ class LLMSummarizer:
         self.model_type = model_type
         self.base_url = base_url or ""
         self.model = model
+        # 点评阶段的联网检索入口；None 表示不联网（补充知识只能标明未核验）
+        self.web_search = web_search
         self.warnings: list[str] = []
         # 编码后的截图 data URL：同一次运行里重试、续写会把同一批图再发一次。
         self._frame_urls: dict[str, str] = {}
@@ -607,8 +666,13 @@ class LLMSummarizer:
         await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
             analysis_progress = 93
-            analysis_stage = "正在补充点评与分析"
+            analysis_stage = "正在补充点评与分析" + (
+                "（可联网核验）" if self.web_search is not None else ""
+            )
             await self._report_progress(progress_callback, analysis_progress, analysis_stage)
+            tool_handler = self._web_search_handler(
+                progress_callback, analysis_progress, analysis_stage
+            )
             analysis = ""
             reason = ""
             # 点评是初稿之后的可选增强：免费网关的公共并发随时段波动（群测期实测 429），
@@ -624,13 +688,17 @@ class LLMSummarizer:
                     await asyncio.sleep(SECTION_RATE_LIMIT_BACKOFF_SECONDS)
                 try:
                     analysis = await self._complete(
-                        self._analysis_prompt(title, draft),
+                        self._analysis_prompt(
+                            title, draft, web_enabled=tool_handler is not None
+                        ),
                         max_tokens=3_200,
                         effort=self._stage_effort(reasoning_effort, style, "analysis"),
                         progress_callback=progress_callback,
                         progress=analysis_progress,
                         stage=analysis_stage,
                         should_abort=should_abort,
+                        tools=(WEB_SEARCH_TOOL,) if tool_handler is not None else (),
+                        tool_handler=tool_handler,
                     )
                     break
                 except Exception as exc:
@@ -1626,6 +1694,8 @@ class LLMSummarizer:
         effort: str,
         budget: str = "auto",
         frames: Sequence[VideoFrame] = (),
+        tools: Sequence[dict[str, Any]] = (),
+        messages: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """budget: auto（思考档抬高输出预算）/ requested（只用调用方额度）/ omit（不下发）。
 
@@ -1634,6 +1704,9 @@ class LLMSummarizer:
 
         带截图时把 user 消息改成内容数组：先放完整提示词，再按清单顺序逐张放
         “编号｜时间点”文字与图片，让模型能把提示词里的编号对应到具体画面。
+
+        messages 传入时直接用它当对话历史（工具调用的多轮对话要保住历史）；
+        没传才按 prompt + 截图组装。
         """
         content: Any = prompt
         if frames:
@@ -1653,17 +1726,23 @@ class LLMSummarizer:
                 )
         request: dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是视频笔记编辑。忠实理解语境与作者意图，允许结合上下文"
-                        "保守修正明显的口误、笔误和语音转写错误。"
-                    ),
-                },
-                {"role": "user", "content": content},
-            ],
+            "messages": (
+                list(messages)
+                if messages is not None
+                else [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是视频笔记编辑。忠实理解语境与作者意图，允许结合上下文"
+                            "保守修正明显的口误、笔误和语音转写错误。"
+                        ),
+                    },
+                    {"role": "user", "content": content},
+                ]
+            ),
         }
+        if tools:
+            request["tools"] = list(tools)
         token_key = (
             "max_completion_tokens"
             if self.model_type == "openai" and str(self.model).startswith("gpt-5")
@@ -1702,15 +1781,50 @@ class LLMSummarizer:
         budget: str = "auto",
         connection_retries: int = 1,
         frames: Sequence[VideoFrame] = (),
+        tools: Sequence[dict[str, Any]] = (),
+        tool_handler: Callable[[str, str], Awaitable[str]] | None = None,
+        messages: Sequence[dict[str, Any]] | None = None,
+        tool_rounds: int = MAX_TOOL_ROUNDS,
     ) -> str:
+        """一次成稿调用；带 tools 时是多轮：模型发起工具调用 → 执行 → 继续要正文。
+
+        tool_handler(工具名, 参数 JSON) 返回给模型看的检索结果文本；
+        messages 是工具回合累积的对话历史（首轮传 None，按 prompt 组装）。
+        """
         if should_abort is not None and should_abort():
             raise asyncio.CancelledError("任务已取消")
 
-        request = self._build_request(prompt, max_tokens, effort, budget, frames)
+        request = self._build_request(
+            prompt, max_tokens, effort, budget, frames, tools=tools, messages=messages
+        )
         try:
             # 流式建连：既能逐块读取，也能在取消时立即中止本次请求
             stream = await self.client.chat.completions.create(**request, stream=True)
         except Exception as exc:
+            # 通道连工具调用都不认（不少第三方网关没有 function calling）：
+            # 去掉 web_search 重投一次，退回不联网的点评，而不是判任务失败
+            if _rejected_tool_params(exc, request):
+                warning = (
+                    f"{stage}：该通道不支持工具调用，已改为不联网继续，"
+                    "补充知识会标明未联网核验"
+                )
+                self._warn_once(warning)
+                await self._report_progress(progress_callback, progress, warning)
+                return await self._complete(
+                    prompt,
+                    max_tokens,
+                    effort,
+                    retry_empty=retry_empty,
+                    progress_callback=progress_callback,
+                    progress=progress,
+                    stage=stage,
+                    should_abort=should_abort,
+                    param_attempts=param_attempts,
+                    budget=budget,
+                    connection_retries=connection_retries,
+                    frames=frames,
+                    messages=messages,
+                )
             # 通道不认我们下发的参数时，按下一级写法重试，而不是直接判任务失败
             rejected = self._rejected_request_params(exc, request)
             if not rejected or param_attempts <= 0:
@@ -1731,9 +1845,14 @@ class LLMSummarizer:
                 param_attempts=param_attempts - 1,
                 budget=budget,
                 frames=frames,
+                tools=tools,
+                tool_handler=tool_handler,
+                messages=messages,
+                tool_rounds=tool_rounds,
             )
 
         parts: list[str] = []
+        tool_fragments: dict[int, dict[str, str]] = {}
         content_characters = 0
         reasoning_characters = 0
         next_beat = time.monotonic() + LLM_HEARTBEAT_SECONDS
@@ -1750,6 +1869,20 @@ class LLMSummarizer:
                 if content:
                     parts.append(content)
                     content_characters += len(content)
+                # 工具调用增量：id/名字整段给、参数分片给，按 index 归并到同一槽位
+                for fragment in getattr(delta, "tool_calls", None) or ():
+                    slot = tool_fragments.setdefault(
+                        int(getattr(fragment, "index", 0) or 0),
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if getattr(fragment, "id", None):
+                        slot["id"] = fragment.id
+                    function = getattr(fragment, "function", None)
+                    if function is not None:
+                        if getattr(function, "name", None):
+                            slot["name"] += function.name
+                        if getattr(function, "arguments", None):
+                            slot["arguments"] += function.arguments
                 # 不按"没有正文才算思考"分叉：有的通道把 reasoning_content 和 content
                 # 塞在同一个块里，那样会一个都不计，心跳与"关思考没生效"的判读都会失真
                 if delta is not None:
@@ -1797,6 +1930,10 @@ class LLMSummarizer:
                     budget=budget,
                     connection_retries=connection_retries - 1,
                     frames=frames,
+                    tools=tools,
+                    tool_handler=tool_handler,
+                    messages=messages,
+                    tool_rounds=tool_rounds,
                 )
             raise
         finally:
@@ -1825,6 +1962,61 @@ class LLMSummarizer:
                 "该通道没有响应「关闭深度思考」的请求，仍在返回思考链；"
                 f"这类通道上正文偏长时容易被思考吃满输出额度，{hint}。"
             )
+        tool_calls = [tool_fragments[index] for index in sorted(tool_fragments)]
+        if tool_calls and tool_handler is not None:
+            # 工具调用回合：把发起的调用与结果写回对话历史，继续向模型要正文。
+            # 回合额度用完还想要检索时，工具结果回一句“停止检索”，让模型收尾。
+            searching = tool_rounds > 0
+            history = list(request["messages"])
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {
+                            "id": call["id"] or f"call_{index}",
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["arguments"] or "{}",
+                            },
+                        }
+                        for index, call in enumerate(tool_calls)
+                    ],
+                }
+            )
+            for index, call in enumerate(tool_calls):
+                result = (
+                    await tool_handler(call["name"], call["arguments"])
+                    if searching
+                    else "联网检索预算已用完，请基于已有信息直接完成点评。"
+                )
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"] or f"call_{index}",
+                        "content": result,
+                    }
+                )
+            following = await self._complete(
+                prompt,
+                max_tokens,
+                effort,
+                retry_empty=retry_empty,
+                progress_callback=progress_callback,
+                progress=progress,
+                stage=stage,
+                should_abort=should_abort,
+                param_attempts=param_attempts,
+                budget=budget,
+                connection_retries=connection_retries,
+                frames=(),
+                tools=tools if searching else (),
+                tool_handler=tool_handler if searching else None,
+                messages=history,
+                tool_rounds=tool_rounds - 1 if searching else 0,
+            )
+            return f"{content}\n\n{following}".strip() if content else following
         if not content:
             outcome = (
                 f"下发 max_tokens={self._sent_token_budget(request)}、思考档={effort}，"
@@ -1850,6 +2042,10 @@ class LLMSummarizer:
                     param_attempts=param_attempts,
                     budget=budget,
                     frames=frames,
+                    tools=tools,
+                    tool_handler=tool_handler,
+                    messages=messages,
+                    tool_rounds=tool_rounds,
                 )
             # 已经关过思考却仍只收到思考 ⇒ 这条通道不认我们的关闭请求，再劝"关闭深度
             # 思考"就是把人往死胡同里带（1.4.2 群测实测：off 档下发后仍累计 6473 字
@@ -2002,35 +2198,8 @@ class LLMSummarizer:
         两种形状都要认：否认参数名（``"thinking" is not supported``），以及只否认我们给的
         取值（``'reasoning_effort' must be one of: 'low', ...``）。后者按参数不可用处理——
         会多花两次请求把 flat → 嵌套的阶梯试完，之后按 (provider, model, base_url) 记住。
-
-        不能简单“看消息里提到了哪个名字”：拒绝提示会同时推荐另一个参数
-        （"thinking" is not supported ... use "reasoning_effort"），所以只取服务端
-        标出的 param 字段，或引号包住且紧跟拒绝措辞的那个名字。
         """
-        text = str(exc)
-        lowered = text.lower()
-        if not any(
-            hint in lowered
-            for hint in (
-                "unsupported_parameter",
-                "not supported",
-                "unsupported parameter",
-                "unknown parameter",
-                "unrecognized",
-                "must be one of",
-                "invalid_value",
-                "invalid value",
-            )
-        ):
-            return ()
-        names: set[str] = set()
-        body = getattr(exc, "body", None)
-        if isinstance(body, dict):
-            error = body.get("error")
-            if isinstance(error, dict) and error.get("param"):
-                names.add(str(error["param"]).strip().lower())
-        for pattern in (_UNSUPPORTED_PARAM_RE, _REJECTED_VALUE_RE):
-            names.update(match.group(1).lower() for match in pattern.finditer(text))
+        names = _unsupported_param_names(exc)
         sent = set(request)
         extra_body = request.get("extra_body")
         if isinstance(extra_body, dict):
@@ -2195,11 +2364,49 @@ Markdown 脚注集中说明。不要在正文反复插入“原文如此”或�
 材料：
 {source}"""
 
+    def _web_search_handler(
+        self,
+        progress_callback: ProgressCallback | None,
+        progress: int,
+        stage: str,
+    ) -> Callable[[str, str], Awaitable[str]] | None:
+        """点评阶段 web_search 工具的执行器：扣检索预算、回报进度、排版结果。
+
+        没开联网核验时返回 None，点评退回“补充知识标明未联网核验”的老路。
+        """
+        searcher = self.web_search
+        if searcher is None:
+            return None
+        searches_left = [searcher.max_searches]
+
+        async def run_web_search(name: str, arguments: str) -> str:
+            if name != WEB_SEARCH_TOOL_NAME:
+                return f"未知工具：{name}"
+            if searches_left[0] <= 0:
+                return "联网检索次数已用完，请基于已有信息直接完成点评。"
+            searches_left[0] -= 1
+            query = search_query_from_arguments(arguments)
+            await self._report_progress(
+                progress_callback, progress, f"{stage}：正在联网检索「{query}」"
+            )
+            return await searcher.search_report(query)
+
+        return run_web_search
+
     @staticmethod
-    def _analysis_prompt(title: str, draft: str) -> str:
+    def _analysis_prompt(title: str, draft: str, web_enabled: bool = False) -> str:
+        verify_hint = (
+            "可以调用 web_search 工具联网检索核验事实：涉及数字、日期、人物、产品规格、"
+            "标准与结论依据的关键断言，先检索再下判断；核验过的补充知识用 Markdown "
+            "链接标明来源（可在点评末尾列「参考来源」），只有检索不到或无法确认的才标明"
+            "“模型补充，未联网核验”。"
+            if web_enabled
+            else "可以补充有助于理解的稳定背景知识，但必须标明“模型补充，未联网核验”，"
+            "不得把它写成视频原话或已核实事实。"
+        )
         return f"""请针对这份视频笔记所对应的视频内容本身，补写一段独立的点评与分析，只输出可直接追加到笔记后的 Markdown。
 
-点评对象是视频里的内容，而不是笔记的写法：作者的核心观点与立场是否成立、论据与例证是否充分、论证逻辑是否严密、结论是否可靠，以及内容的信息价值、适用场景和值得进一步思考的问题。可以补充有助于理解的稳定背景知识，但必须标明“模型补充，未联网核验”，不得把它写成视频原话或已核实事实。语气中性自然，服务于理解内容，避免复述已有笔记；不要评价笔记的组织结构、文笔或排版。
+点评对象是视频里的内容，而不是笔记的写法：作者的核心观点与立场是否成立、论据与例证是否充分、论证逻辑是否严密、结论是否可靠，以及内容的信息价值、适用场景和值得进一步思考的问题。{verify_hint}语气中性自然，服务于理解内容，避免复述已有笔记；不要评价笔记的组织结构、文笔或排版。
 
 标题：{title}
 

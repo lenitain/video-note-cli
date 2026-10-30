@@ -27,6 +27,7 @@ from .settings import (
     output_directory,
     user_config_path,
 )
+from .web_search import WEB_SEARCH_BACKENDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +79,25 @@ def build_parser() -> argparse.ArgumentParser:
         choices=NOTE_EFFORTS,
         default=None,
         help="模型推理强度（默认读取配置，初始为 auto；max 按 high 处理）",
+    )
+    parser.add_argument(
+        "--web",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "点评阶段允许模型联网检索、核验事实并标注来源"
+            "（默认读取配置，初始为开启）；--no-web 关闭"
+        ),
+    )
+    parser.add_argument(
+        "--web-backend",
+        choices=WEB_SEARCH_BACKENDS,
+        default=None,
+        help=(
+            "联网检索后端：baidu / bing 免 Key，duckduckgo 免 Key（需国际网络），"
+            "tavily 需 Key；auto 有 Key 用 tavily，否则 baidu 优先、bing 兜底"
+            "（默认读取配置）"
+        ),
     )
     parser.add_argument(
         "-t",
@@ -328,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
                 screenshot_interval=args.screenshot_interval,
                 note_style=args.style,
                 note_effort=args.effort,
+                web=args.web,
+                web_backend=args.web_backend,
                 reuse=args.reuse,
                 save_transcript=args.save_transcript,
                 prefer_subtitles=args.subtitles,
