@@ -53,7 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--out",
         metavar="DIR",
-        help="输出目录（默认读取配置，初始为 ~/notes/video）",
+        help=(
+            "产物根目录（默认读取配置，初始为 ~/notes/video）；"
+            "每次运行在下面建 <标题>_<开始时间>/ 目录"
+        ),
     )
     parser.add_argument(
         "--style",
@@ -76,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-transcript",
         action="store_true",
-        help="生成笔记时，同时把转录稿写到输出目录（与下面几件成品无关）",
+        help="生成笔记时，同时把转录稿写到本次运行的目录（与下面几件成品无关）",
     )
     parser.add_argument(
         "--from-transcript",

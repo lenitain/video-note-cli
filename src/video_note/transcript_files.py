@@ -274,31 +274,6 @@ def note_output_paths(directory: Path, stem: str) -> dict[str, Path]:
     }
 
 
-def unique_note_stem(directory: Path, stem: str) -> str:
-    """没被占用的笔记主干：三件成品里任何一个已存在就换 ``-2``、``-3``。
-
-    成品可以只写其中一两件，只看 ``.md`` 会让只写了 HTML 的那次被覆盖。
-    """
-    suffixes = (NOTE_TEXT_SUFFIX, NOTE_IMAGE_SUFFIX, NOTE_HTML_SUFFIX)
-    candidate = stem
-    index = 2
-    while any(
-        (directory / f"{candidate}{suffix}").exists() for suffix in suffixes
-    ):
-        candidate = f"{stem}-{index}"
-        index += 1
-    return candidate
-
-
-def unique_transcript_stem(directory: Path, stem: str) -> str:
-    candidate = stem
-    index = 2
-    while any((directory / f"{candidate}{suffix}").exists() for suffix in (".json", ".md", ".srt")):
-        candidate = f"{stem}-{index}"
-        index += 1
-    return candidate
-
-
 def _write_text_atomic(path: Path, text: str, *, newline: str | None = None) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     with temporary.open("w", encoding="utf-8", newline=newline) as file:

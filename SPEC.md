@@ -12,7 +12,7 @@
 3. **切画面**：按画面变化把视频切成片段，每段留一张代表帧（URL 输入会额外下载一份低清预览视频）。
 4. **写笔记**：把转录稿（按时间切段）与该段的画面一起发给视觉模型，产出带时间轴、图文内嵌的 Markdown。
    终稿装不进一次成稿额度、或视频超过 10 分钟时自动分段直写（按时间顺序写完整，不预先压成摘要，每段都有尾部核对）。
-5. **出成品**：按开关写 Markdown / HTML / 转录稿到输出目录。
+5. **出成品**：按开关写 Markdown / HTML / 转录稿到本次运行的目录（`<标题>_<开始时间>/`）。
 
 每一步都可以单独跳过：`--transcript-only` 只要转录稿，`--no-screenshots` 不要画面，
 `--from-transcript` 直接从已有转录稿开始。
@@ -62,7 +62,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --pages 1,3-5
 # 用浏览器导出的 cookies.txt 读取 B 站 AI 字幕
 video-note 'https://www.bilibili.com/video/BVxxxx' --cookie-file ~/cookies.txt
 
-# 生成笔记时顺便把转录稿也放到输出目录
+# 生成笔记时顺便把转录稿也放到这次的运行目录
 video-note 'https://www.bilibili.com/video/BVxxxx' --save-transcript
 
 # 改成每 10 秒抽一帧，画面更密（抽帧开关与间隔各管各的）
@@ -83,11 +83,11 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --clean
 | 参数 | 说明 |
 |---|---|
 | `input` | 视频链接、本地音视频文件，或 `.srt`/`.vtt`/`.json` 字幕文件 |
-| `-o, --out DIR` | 输出目录（默认读取配置，初始为 `~/notes/video`） |
+| `-o, --out DIR` | 输出根目录（默认读取配置，初始为 `~/notes/video`）；每次运行在下面建 `<标题>_<开始时间>/` |
 | `--style detailed\|faithful\|concise` | 笔记风格，默认 `detailed`；详细+点评 / 忠实复原 / 精简 |
 | `--effort auto\|off\|high\|max` | 模型推理强度，默认 `auto`；`max` 按 `high` 处理 |
 | `-t, --transcript-only` | 只生成带时间轴的转录稿，不调用大模型、不需要 API Key |
-| `--save-transcript` | 生成笔记时同时把转录稿写到输出目录 |
+| `--save-transcript` | 生成笔记时同时把转录稿写到本次运行的目录 |
 | `--from-transcript FILE` | 跳过下载和转写，直接从转录稿生成笔记 |
 | `--no-subtitles` | 不读平台字幕，强制使用本地语音转写 |
 | `--pages N[,N-M]` | B 站分 P 选择，例如 `1,3-5`（默认跟随链接 `?p=`，否则全部） |
@@ -156,7 +156,7 @@ bili_jct = ""
 buvid3 = ""
 
 [output]
-dir = "~/notes/video"
+dir = "~/notes/video"        # 产物根目录；每次运行在它下面建 <标题>_<开始时间>/
 
 [screenshots]
 enabled = true         # 抽帧并把画面插进正文（需要支持图片输入的模型）
@@ -200,7 +200,7 @@ api_key_env = "provider"  # 环境变量名；"provider" = 该 provider 的惯�
 | `VIDEO_NOTE_MODEL` | model |
 | `VIDEO_NOTE_ASR_MODEL` | 转写模型 |
 | `VIDEO_NOTE_DEVICE` | `cpu` / `cuda` |
-| `VIDEO_NOTE_OUTPUT_DIR` | 输出目录 |
+| `VIDEO_NOTE_OUTPUT_DIR` | 产物根目录 |
 | `VIDEO_NOTE_SCREENSHOTS` | `1` / `0`，是否抽帧 |
 | `VIDEO_NOTE_SCREENSHOT_INTERVAL` | 画面切分的最小间隔（秒） |
 | `BILI_SESSDATA` / `BILI_JCT` / `BILI_BUVID3` | B 站 Cookie |
@@ -227,7 +227,7 @@ MINIMAX_CN_TOKEN_PLAN_API_KEY=sk-cp-xxx video-note 'https://www.bilibili.com/vid
 # 临时换一把：命令行直接指名环境变量
 VIDEO_NOTE_API_KEY=sk-xxx video-note --api-key-env VIDEO_NOTE_API_KEY 'https://www.bilibili.com/video/BVxxxx'
 
-# 输出目录也可以在配置文件里改，或用环境变量/命令行临时覆盖
+# 产物根目录也可以在配置文件里改，或用环境变量/命令行临时覆盖
 VIDEO_NOTE_OUTPUT_DIR=/data/notes video-note 'https://www.bilibili.com/video/BVxxxx'
 video-note 'https://www.bilibili.com/video/BVxxxx' --out /data/notes
 ```
@@ -240,9 +240,15 @@ Key 例外：它的来源由 `api_key` / `api_key_env` 显式声明，不靠“�
 
 ## 4. 输出
 
-默认写到 `~/notes/video`，可在配置文件的 `[output] dir` 修改，也可以用 `VIDEO_NOTE_OUTPUT_DIR` 或 `--out` 临时覆盖。
+输出根目录默认是 `~/notes/video`，可在配置文件的 `[output] dir` 修改，也可以用 `VIDEO_NOTE_OUTPUT_DIR` 或 `--out` 临时覆盖。
+
+**一次运行一个目录**：根目录下面每次运行建一个子目录 `<标题>_<开始提取时间>/`，例如
+`深入理解索引_20251030-143012/`。时间戳是这次**开始提取**的时刻（不是落盘时刻——下载、转写、写笔记都要花时间），
+同一秒里重跑同一支视频时目录名后面加 `-2`、`-3`。
 
 ### 4.1 产物
+
+一次运行的全部产物都在那个目录里：
 
 - 网页版（看图的那份）：`<标题>.html`，图片内联成 data URI，单文件、浏览器双击就能看
 - 笔记（文字的那份）：`<标题>.md`，不含插图
@@ -250,7 +256,8 @@ Key 例外：它的来源由 `api_key` / `api_key_env` 显式声明，不靠“�
 - 原始截图：`<标题>.frames/`，抽出的每一段画面都在这里，含区间清单 `frames.json`；缓存里不再放图片
 - 转录：`<标题>.transcript.md`、`<标题>.transcript.json`、`<标题>.transcript.srt`
 - B 站分 P：`<标题>-P1,3.md`（转录稿同理）
-- 重名时自动加 `-2`、`-3`
+
+文件名只由标题和固定后缀决定；每次运行落在新的时间戳目录里，同一个目录里不会撞名。
 
 ### 4.2 缓存
 
@@ -278,7 +285,7 @@ rm -rf ~/.cache/video-note/runs
 - 切换要连续两次采样都确认，字幕换行、光标移动、一次按键高亮不会把一张幻灯片拆成几张；两段画面间隔小于 `--screenshot-interval` 时并进下一段
 - 画面被切成时间段，不再是一个孤立时间点：幻灯片在小节开始前就出现、一直讲到段中，也会配给这一节
 - 按段直写时每段只带该时间段的画面，候选最多 16 张；提示词允许的插图数按这段时长给（约 4 分钟一张，单段最多 8 张），避免长段被压成零星两三张
-- 截图直接抽到产物目录的 `<标题>.frames/`（不再进缓存）：HTML 里内联它们，Markdown 默认不带图
+- 截图直接抽到本次运行目录的 `<标题>.frames/`（不再进缓存）：HTML 里内联它们，Markdown 默认不带图
 - 模型在正文里写 `[[图片 0003：说明文字]]`，程序换成 `![说明文字](./标题-frames/frame_0002_60s.jpg)`；两件 Markdown 成品里，`<标题>.md` 去掉插图行，`<标题>.images.md` 保留
 - 插图目录名不含空格与括号，图片链接因此不需要 `<>` 包裹——终端预览、编辑器、浏览器都能直接解析
 - 插图会按所在小节的时间区间核对：引用了不存在的编号、同一张图重复引用、图不在本节区间内，都会在日志里明确报出来；越界的图先换成本节里第一张没用过的画面（原说明一并弃用，改用这张图自己的时间段），换不到才删除
@@ -286,18 +293,18 @@ rm -rf ~/.cache/video-note/runs
 - 模型一张都没引用时，退化成笔记末尾的 `## 视频截图` 图库（最多 12 张），保证画面不丢
 - 字幕文件 / `--from-transcript` 输入没有视频画面，会跳过抽帧
 - `--transcript-only` 只输出转录，也会跳过抽帧
-- `--clean` 会清理缓存里的音频与预览视频（顺带清掉旧版本留下的 `frames_*` 目录），输出目录里的 `.html` 与 `.frames/` 一律保留
+- `--clean` 会清理缓存里的音频与预览视频（顺带清掉旧版本留下的 `frames_*` 目录），运行目录里的 `.html` 与 `.frames/` 一律保留
 
 截图缓存也支持复用：同一输入、同一间隔再次运行，不会重新下载预览或重新切帧；换间隔会按新间隔重新切。
 没有区间清单的旧缓存会重新切一次（否则配图只能按时间点猜）。`--no-reuse` 可强制重跑。
-截图目录必须和笔记放在一起，移动笔记时请连同 `.frames/` 一起移动，否则图片链接会失效。
+截图目录和笔记在同一个运行目录里：移动时把整个 `<标题>_<开始时间>/` 目录一起搬走，图片链接就不会失效。
 
 **在浏览器里看**：浏览器不渲染 Markdown，双击 `.md` 只会显示纯文本；Markdown 预览扩展默认也不允许读 `file://` 下的相对图片。
 所以默认同时写一份同名 `.html`（图片内联成 data URI，单文件可随意复制），直接 `xdg-open <标题>.html` 就能看到图文
 （只要 HTML：`--html`；只要文字：`--md-noimage`）；已有笔记可以单独转换：
 
 ```bash
-uv run python -m video_note.html_export ~/notes/video/某个笔记.md
+uv run python -m video_note.html_export ~/notes/video/某个笔记_20251030-143012/某个笔记.md
 ```
 
 **需要视觉模型。** 画面以 base64 图片随请求发送，模型必须支持图片输入（默认的 `deepseek-flash`、`gpt-4o`、`qwen-vl`、`glm-4v`、Kimi 视觉版等）。

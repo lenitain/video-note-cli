@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ from .render import (
     friendly_llm_error_message,
     redact_secrets,
     resolve_frame_placeholders,
+    run_directory_name,
     without_images,
 )
 from .screenshots import FrameSource, extract_frames_async
@@ -51,8 +53,6 @@ from .transcript_files import (
     load_transcript_artifact,
     note_output_paths,
     transcript_source_label,
-    unique_note_stem,
-    unique_transcript_stem,
     write_transcript_artifacts,
 )
 from .video_frames import VideoFrame, evenly_sample_frames
@@ -227,6 +227,9 @@ async def run_video_note_pipeline(
     _validate_options(options, settings)
     # Key 的来源定案（命令行 --provider 也在内，所以放在这一步）
     settings = resolve_credentials(settings)
+    # 产物目录名里的时间戳是这次开始提取的时刻：下载、转写、写笔记都要花时间，
+    # 拿落盘时刻当开始提取会偏。
+    started_at = datetime.now()
 
     summarizer: LLMSummarizer | None = None
     if not options.transcript_only:
@@ -255,15 +258,18 @@ async def run_video_note_pipeline(
         )
         _check_quality(bundle, options)
 
-        # 笔记主干先定下来：插图要直接抽到产物目录里的 <笔记>.frames，不再经过缓存。
+        # 一次运行一个目录：笔记、插图、转录稿都在里面，搬走只搬一个目录。
+        run_dir = _run_output_dir(
+            options.output_dir, resolved.title, started_at
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log(f"产物目录：{run_dir}")
+
         # 几件成品共用同一个主干，各自的名字因此互不影响。
         note_stem = (
             None
             if options.transcript_only
-            else unique_note_stem(
-                options.output_dir,
-                artifact_stem(resolved.title, resolved.info, "note"),
-            )
+            else artifact_stem(resolved.title, resolved.info, "note")
         )
 
         frames: list[VideoFrame] = []
@@ -282,12 +288,12 @@ async def run_video_note_pipeline(
                     cookies,
                     cancel,
                     bundle.segments,
-                    _frames_directory(options.output_dir, note_stem),
+                    _frames_directory(run_dir, note_stem),
                 )
 
         if options.transcript_only:
             transcript_paths = _write_transcript_output(
-                resolved, bundle, options, stem=None
+                resolved, bundle, directory=run_dir, stem=None
             )
             log(
                 f"转录完成：{len(bundle.segments)} 段，"
@@ -314,6 +320,7 @@ async def run_video_note_pipeline(
             summarizer,
             cancel,
             frames,
+            run_dir,
         )
         log("笔记本完成：" + "，".join(str(path) for path in note_files))
         _clean_run_cache(resolved, options, settings)
@@ -482,12 +489,12 @@ async def _obtain_transcript(
         )
         return _bundle_from_loaded(resolved.loaded)
 
-    run_dir = _run_directory(resolved, options, settings)
+    cache_dir = _cache_run_dir(resolved, options, settings)
     if options.reuse:
-        cached = _load_cached_transcript(run_dir)
+        cached = _load_cached_transcript(cache_dir)
         if cached is not None:
-            log(f"复用已有转录：{run_dir / 'transcript.json'}")
-            _restore_run_metadata(run_dir, resolved)
+            log(f"复用已有转录：{cache_dir / 'transcript.json'}")
+            _restore_run_metadata(cache_dir, resolved)
             return cached
 
     if resolved.kind == "url":
@@ -498,7 +505,7 @@ async def _obtain_transcript(
             asr,
             cookies,
             cancel,
-            run_dir.name,
+            cache_dir.name,
         )
     else:
         assert resolved.media_path is not None
@@ -506,7 +513,7 @@ async def _obtain_transcript(
         result = await asr.transcribe(resolved.media_path, resolved.title)
         bundle = _bundle_from_asr(result, resolved.info)
 
-    _write_cached_transcript(run_dir, resolved, bundle)
+    _write_cached_transcript(cache_dir, resolved, bundle)
     return bundle
 
 
@@ -758,8 +765,8 @@ async def _download_audio(
     media_name: str,
     cancel: Cancellation,
 ) -> Path:
-    run_dir = runs_root() / run_key
-    cached = _find_cached_media(run_dir, media_name)
+    cache_dir = runs_root() / run_key
+    cached = _find_cached_media(cache_dir, media_name)
     if cached is not None:
         log(f"复用已下载音频：{cached.name}")
         return cached
@@ -874,7 +881,7 @@ def _check_quality(bundle: TranscriptBundle, options: RunOptions) -> None:
         )
 
 
-def _run_directory(
+def _cache_run_dir(
     resolved: ResolvedInput, options: RunOptions, settings: UserSettings
 ) -> Path:
     identity = _cache_identity(resolved, options, settings)
@@ -901,8 +908,8 @@ def _cache_identity(
     return f"input:{resolved.source}|{common}"
 
 
-def _load_cached_transcript(run_dir: Path) -> TranscriptBundle | None:
-    path = run_dir / "transcript.json"
+def _load_cached_transcript(cache_dir: Path) -> TranscriptBundle | None:
+    path = cache_dir / "transcript.json"
     if not path.is_file():
         return None
     try:
@@ -913,10 +920,10 @@ def _load_cached_transcript(run_dir: Path) -> TranscriptBundle | None:
 
 
 def _write_cached_transcript(
-    run_dir: Path, resolved: ResolvedInput, bundle: TranscriptBundle
+    cache_dir: Path, resolved: ResolvedInput, bundle: TranscriptBundle
 ) -> None:
     write_transcript_artifacts(
-        run_dir,
+        cache_dir,
         "transcript",
         bundle.segments,
         title=resolved.title,
@@ -932,14 +939,14 @@ def _write_cached_transcript(
         "bili_pages": resolved.info.get("bili_pages") or [],
         "bili_total_pages": resolved.info.get("bili_total_pages") or 0,
     }
-    (run_dir / "run.json").write_text(
+    (cache_dir / "run.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
 
-def _restore_run_metadata(run_dir: Path, resolved: ResolvedInput) -> None:
-    path = run_dir / "run.json"
+def _restore_run_metadata(cache_dir: Path, resolved: ResolvedInput) -> None:
+    path = cache_dir / "run.json"
     if not path.is_file():
         return
     try:
@@ -966,19 +973,16 @@ def _restore_run_metadata(run_dir: Path, resolved: ResolvedInput) -> None:
 def _write_transcript_output(
     resolved: ResolvedInput,
     bundle: TranscriptBundle,
-    options: RunOptions,
     *,
+    directory: Path,
     stem: str | None,
 ) -> dict[str, Path]:
-    output_dir = options.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     base_stem = stem or artifact_stem(
         resolved.title, resolved.info, "transcript"
     )
-    unique_stem = unique_transcript_stem(output_dir, base_stem)
     paths = write_transcript_artifacts(
-        output_dir,
-        unique_stem,
+        directory,
+        base_stem,
         bundle.segments,
         title=resolved.title,
         language=bundle.language,
@@ -1000,9 +1004,9 @@ async def _generate_note(
     summarizer: LLMSummarizer,
     cancel: Cancellation,
     frames: Sequence[VideoFrame],
+    run_dir: Path,
 ) -> tuple[list[Path], dict[str, Path]]:
-    options.output_dir.mkdir(parents=True, exist_ok=True)
-    note_paths = note_output_paths(options.output_dir, note_stem)
+    note_paths = note_output_paths(run_dir, note_stem)
 
     resolved.info["duration"] = (
         resolved.info.get("duration") or bundle.duration
@@ -1102,24 +1106,34 @@ async def _generate_note(
         transcript_paths = _write_transcript_output(
             resolved,
             bundle,
-            options,
+            directory=run_dir,
             stem=f"{note_stem}.transcript",
         )
     return note_files, transcript_paths
 
 
-def _frames_directory(output_dir: Path, note_stem: str) -> Path:
-    """插图目录就放在笔记旁边：``<笔记>.frames/``。
+def _run_output_dir(
+    output_dir: Path, title: str, started_at: datetime
+) -> Path:
+    """本次运行的产物目录：``<输出目录>/<标题>_<开始提取时间>/``。
 
-    抽帧直接写到这里，产物目录里既有成品的 HTML，也有原始截图；缓存里不再留图片。
+    同一秒里重跑同一支视频会撞名，撞了就加 ``-2``、``-3``。
     """
-    name = frame_directory_name(note_stem)
+    name = run_directory_name(title, started_at)
     candidate = output_dir / name
     index = 2
     while candidate.exists():
         candidate = output_dir / f"{name}-{index}"
         index += 1
     return candidate
+
+
+def _frames_directory(run_dir: Path, note_stem: str) -> Path:
+    """插图目录就放在本次运行的目录里：``<笔记>.frames/``。
+
+    抽帧直接写到这里，运行目录里既有成品的 HTML，也有原始截图；缓存里不再留图片。
+    """
+    return run_dir / frame_directory_name(note_stem)
 
 
 def _publish_note_frames(
@@ -1157,12 +1171,12 @@ async def _prepare_screenshots(
 ) -> list[VideoFrame]:
     """Download one preview per 分P (or use the local file), then cut 画面段落.
 
-    截图直接写进产物目录的 ``<笔记>.frames/``；缓存里只留音频与预览视频。
+    截图直接写进本次运行目录的 ``<笔记>.frames/``；缓存里只留音频与预览视频。
     """
-    run_dir = _run_directory(resolved, options, settings)
+    cache_dir = _cache_run_dir(resolved, options, settings)
     try:
         sources = await _frame_sources(
-            resolved, video_processor, cookies, cancel, run_dir, segments
+            resolved, video_processor, cookies, cancel, cache_dir, segments
         )
         cancel.check()
         log(
@@ -1196,7 +1210,7 @@ async def _frame_sources(
     video_processor: VideoProcessor,
     cookies: dict[str, str] | None,
     cancel: Cancellation,
-    run_dir: Path,
+    cache_dir: Path,
     segments: Sequence[TranscriptSegment],
 ) -> list[FrameSource]:
     """每个分 P 一个预览视频，各自带着自己在合并时间轴上的偏移。"""
@@ -1207,7 +1221,7 @@ async def _frame_sources(
     pages = _bilibili_frame_pages(resolved, segments)
     if not pages:
         preview = await _download_preview_video(
-            video_processor, resolved.source, run_dir.name, cookies, cancel
+            video_processor, resolved.source, cache_dir.name, cookies, cancel
         )
         return [FrameSource(preview)]
 
@@ -1216,7 +1230,7 @@ async def _frame_sources(
         preview = await _download_preview_video(
             video_processor,
             url,
-            run_dir.name,
+            cache_dir.name,
             cookies,
             cancel,
             media_name=f"preview_p{page}",
@@ -1292,8 +1306,8 @@ async def _download_preview_video(
     cancel: Cancellation,
     media_name: str = "preview",
 ) -> Path:
-    run_dir = runs_root() / run_key
-    cached = _find_cached_media(run_dir, media_name)
+    cache_dir = runs_root() / run_key
+    cached = _find_cached_media(cache_dir, media_name)
     if cached is not None:
         log(f"复用已下载预览视频：{cached.name}")
         return cached
@@ -1321,9 +1335,9 @@ def _clean_run_cache(
         return
     if resolved.kind not in {"url", "local_media"}:
         return
-    run_dir = _run_directory(resolved, options, settings)
-    if run_dir.is_dir():
-        _remove_cached_media(run_dir)
+    cache_dir = _cache_run_dir(resolved, options, settings)
+    if cache_dir.is_dir():
+        _remove_cached_media(cache_dir)
 
 
 def _find_cached_media(directory: Path, media_name: str) -> Path | None:

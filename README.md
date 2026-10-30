@@ -74,7 +74,7 @@ video-note 'https://www.bilibili.com/video/BVxxxx' --transcript-only
 video-note 'https://www.bilibili.com/video/BVxxxx'
 ```
 
-产物默认写到 `~/notes/video`：`视频.html`（图文，单文件）、`视频.md`（纯文字）、`视频.frames/`（截图）、`视频.transcript.*`（转录稿）。
+产物默认写到 `~/notes/video`，每次运行一个目录 `视频_20251030-143012/`：里面是 `视频.html`（图文，单文件）、`视频.md`（纯文字）、`视频.frames/`（截图）、`视频.transcript.*`（转录稿）。
 
 完整参数、配置项、产物布局与故障排查见 **[SPEC.md](SPEC.md)**。
 

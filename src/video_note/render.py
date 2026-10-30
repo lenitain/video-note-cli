@@ -8,6 +8,10 @@ from .transcript import format_timestamp, parse_timestamp
 from .video_frames import VideoFrame
 
 SAFE_NAME_LIMIT = 80
+# 目录名的长度上限是字节数（ext4 单个路径分量 255 字节），不是字符数：
+# 一个汉字占 3 字节，80 个汉字再加时间戳就超了。
+RUN_DIR_BYTE_LIMIT = 255
+RUN_DIR_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 API_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b")
 # 模型在正文里写的插图标记：[[图片 0003：说明文字]]，编号对应 frame_0003_*.jpg。
 FRAME_PLACEHOLDER_RE = re.compile(
@@ -349,6 +353,28 @@ def artifact_stem(title: str, info: dict[str, Any], output: str = "note") -> str
     if len(base) + len(suffix) > SAFE_NAME_LIMIT:
         base = base[: max(1, SAFE_NAME_LIMIT - len(suffix))]
     return safe_filename(f"{base}{suffix}")
+
+
+def run_directory_name(title: str, started_at: datetime) -> str:
+    """一次运行一个目录：``<标题>_<开始提取时间>``。
+
+    时间戳是这次开始提取的时刻，不是落盘时刻——下载、转写、写笔记都要花时间。
+    目录名按字节截断：单个路径分量上限 255 字节，一个汉字就占 3 字节。
+    """
+    stamp = started_at.strftime(RUN_DIR_TIMESTAMP_FORMAT)
+    base = safe_filename(str(title or "").strip() or "video-note")
+    # 留给时间戳（15 字节）、分隔符，还有重名时加的序号（"-100"）。
+    base = _truncate_bytes(base, RUN_DIR_BYTE_LIMIT - len(stamp) - 1 - 4)
+    return f"{base}_{stamp}"
+
+
+def _truncate_bytes(value: str, limit: int) -> str:
+    """按 UTF-8 字节截断，砍掉半个字时整字丢掉。"""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    truncated = encoded[:limit].decode("utf-8", errors="ignore")
+    return truncated.strip() or "video-note"
 
 
 _CONTEXT_LIMIT_MARKERS = (
