@@ -40,7 +40,14 @@ from .render import (
 from .screenshots import FrameSource, extract_frames_async
 from .settings import (
     ASRSettings,
+    DEFAULT_OUTPUT_FORMATS,
     LLMSettings,
+    NOTE_EFFORTS,
+    NOTE_STYLES,
+    OUTPUT_FORMAT_HTML,
+    OUTPUT_FORMAT_MARKDOWN_IMAGES,
+    OUTPUT_FORMAT_MARKDOWN_TEXT,
+    OUTPUT_FORMATS,
     PROVIDER_API_KEY_ENV,
     UserSettings,
     model_cache_root,
@@ -94,9 +101,7 @@ class RunOptions:
     clean_media: bool = False
     screenshots: bool = False
     screenshot_interval: int = 30
-    write_markdown_text: bool = True
-    write_markdown_images: bool = False
-    write_html: bool = True
+    output_formats: tuple[str, ...] = DEFAULT_OUTPUT_FORMATS
     cookie_file: Path | None = None
 
 
@@ -1087,15 +1092,15 @@ async def _generate_note(
     # 三件成品各写各的：带图 Markdown、纯文字 Markdown、单文件 HTML。
     # 同一份正文，带图的用原样，纯文字的去掉插图行。
     note_files: list[Path] = []
-    if options.write_markdown_text:
+    if OUTPUT_FORMAT_MARKDOWN_TEXT in options.output_formats:
         note_paths["text"].write_text(
             without_images(summary), encoding="utf-8"
         )
         note_files.append(note_paths["text"])
-    if options.write_markdown_images:
+    if OUTPUT_FORMAT_MARKDOWN_IMAGES in options.output_formats:
         note_paths["images"].write_text(summary, encoding="utf-8")
         note_files.append(note_paths["images"])
-    if options.write_html:
+    if OUTPUT_FORMAT_HTML in options.output_formats:
         try:
             note_files.append(write_note_html(note_paths["html"], summary))
         except OSError as exc:
@@ -1452,10 +1457,22 @@ def _friendly_download_error(exc: Exception, url: str) -> str:
 
 
 def _validate_options(options: RunOptions, settings: UserSettings) -> None:
-    if options.style not in {"detailed", "faithful", "concise"}:
+    if options.style not in NOTE_STYLES:
         raise PipelineError(f"不支持的笔记风格：{options.style}")
-    if options.effort not in {"auto", "off", "high", "max"}:
+    if options.effort not in NOTE_EFFORTS:
         raise PipelineError(f"不支持的推理强度：{options.effort}")
+    unknown_formats = [
+        name for name in options.output_formats if name not in OUTPUT_FORMATS
+    ]
+    if unknown_formats:
+        raise PipelineError(
+            f"不支持的成品格式：{', '.join(unknown_formats)}；"
+            f"可选 {' / '.join(OUTPUT_FORMATS)}"
+        )
+    if not options.transcript_only and not options.output_formats:
+        raise PipelineError(
+            f"至少要一种成品：{' / '.join(OUTPUT_FORMATS)}"
+        )
     if not options.transcript_only and options.effort == "max":
         # The summarizer maps max to high; keep the same behavior.
         options.effort = "high"

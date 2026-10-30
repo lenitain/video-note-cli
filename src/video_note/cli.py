@@ -16,6 +16,12 @@ from .pipeline import (
     run_video_note_pipeline,
 )
 from .settings import (
+    NOTE_EFFORTS,
+    NOTE_STYLES,
+    OUTPUT_FORMAT_HTML,
+    OUTPUT_FORMAT_MARKDOWN_IMAGES,
+    OUTPUT_FORMAT_MARKDOWN_TEXT,
+    CliOverrides,
     apply_cli_overrides,
     load_user_settings,
     output_directory,
@@ -60,15 +66,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--style",
-        choices=("detailed", "faithful", "concise"),
-        default="detailed",
-        help="笔记风格：detailed 详细+点评 / faithful 忠实复原 / concise 精简（默认 detailed）",
+        choices=NOTE_STYLES,
+        default=None,
+        help=(
+            "笔记风格：detailed 详细+点评 / faithful 忠实复原 / concise 精简"
+            "（默认读取配置，初始为 detailed）"
+        ),
     )
     parser.add_argument(
         "--effort",
-        choices=("auto", "off", "high", "max"),
-        default="auto",
-        help="模型推理强度（默认 auto；max 按 high 处理）",
+        choices=NOTE_EFFORTS,
+        default=None,
+        help="模型推理强度（默认读取配置，初始为 auto；max 按 high 处理）",
     )
     parser.add_argument(
         "-t",
@@ -78,8 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--save-transcript",
-        action="store_true",
-        help="生成笔记时，同时把转录稿写到本次运行的目录（与下面几件成品无关）",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "生成笔记时，同时把转录稿写到本次运行的目录"
+            "（默认读取配置，初始为关闭）"
+        ),
     )
     parser.add_argument(
         "--from-transcript",
@@ -87,9 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过下载和转写，直接从 .json/.srt/.vtt/.md 转录稿生成笔记",
     )
     parser.add_argument(
-        "--no-subtitles",
-        action="store_true",
-        help="不读取平台字幕，强制使用本地语音转写",
+        "--subtitles",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "优先使用平台字幕（默认读取配置，初始为开启）；"
+            "--no-subtitles 强制使用本地语音转写"
+        ),
     )
     parser.add_argument(
         "--pages",
@@ -154,7 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cookie-file",
         metavar="FILE",
-        help="浏览器导出的 Netscape cookies.txt，用于 B 站 AI 字幕",
+        help=(
+            "浏览器导出的 Netscape cookies.txt，用于 B 站 AI 字幕"
+            "（默认读取配置 [bilibili] cookie_file）"
+        ),
     )
     parser.add_argument(
         "--config",
@@ -164,16 +184,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reuse",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="复用同一输入的已有转录（默认开启；用 --no-reuse 强制重跑）",
+        default=None,
+        help=(
+            "复用同一输入的已有转录（默认读取配置，初始为开启；"
+            "--no-reuse 强制重跑）"
+        ),
     )
     parser.add_argument(
         "--clean",
-        action="store_true",
-        help="完成后删除缓存里的音频、预览视频与旧版截图缓存，只保留转录",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "完成后删除缓存里的音频、预览视频与旧版截图缓存，只保留转录"
+            "（默认读取配置，初始为关闭）"
+        ),
     )
     outputs = parser.add_argument_group(
-        "成品（可任意组合，都不指定时默认 --md-noimage --html）"
+        "成品（可任意组合，都不指定时用配置 [output] formats，"
+        "初始为 --md-noimage --html）"
     )
     outputs.add_argument(
         "--md-noimage",
@@ -253,6 +281,18 @@ def parse_pages(value: str) -> tuple[int, ...]:
     return tuple(sorted(pages))
 
 
+def requested_output_formats(args: argparse.Namespace) -> tuple[str, ...]:
+    """命令行点名的成品；空元组表示这次一个都没点名，用配置 [output] formats。"""
+    formats = []
+    if args.md_noimage:
+        formats.append(OUTPUT_FORMAT_MARKDOWN_TEXT)
+    if args.md_image:
+        formats.append(OUTPUT_FORMAT_MARKDOWN_IMAGES)
+    if args.html:
+        formats.append(OUTPUT_FORMAT_HTML)
+    return tuple(formats)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -264,10 +304,6 @@ def main(argv: list[str] | None = None) -> int:
             "-t/--transcript-only 只写转录稿，不写笔记；"
             "要笔记就去掉 -t，要么去掉 --md-noimage/--md-image/--html"
         )
-    # 一件成品都没点名时，照旧写纯文字 Markdown 和 HTML。
-    write_markdown_text, write_markdown_images, write_html = (
-        note_outputs if any(note_outputs) else (True, False, True)
-    )
 
     cancel = Cancellation()
     try:
@@ -276,18 +312,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         settings = apply_cli_overrides(
             settings,
-            provider=args.provider,
-            base_url=args.base_url,
-            model=args.model,
-            api_key=args.api_key,
-            api_key_env=args.api_key_env,
-            token_plan_key=args.token_plan_key,
-            token_plan_key_env=args.token_plan_key_env,
-            asr_model=args.asr,
-            device=args.device,
-            output_dir=args.out,
-            screenshots=args.screenshots,
-            screenshot_interval=args.screenshot_interval,
+            CliOverrides(
+                provider=args.provider,
+                base_url=args.base_url,
+                model=args.model,
+                api_key=args.api_key,
+                api_key_env=args.api_key_env,
+                token_plan_key=args.token_plan_key,
+                token_plan_key_env=args.token_plan_key_env,
+                asr_model=args.asr,
+                device=args.device,
+                output_dir=args.out,
+                output_formats=requested_output_formats(args),
+                screenshots=args.screenshots,
+                screenshot_interval=args.screenshot_interval,
+                note_style=args.style,
+                note_effort=args.effort,
+                reuse=args.reuse,
+                save_transcript=args.save_transcript,
+                prefer_subtitles=args.subtitles,
+                clean=args.clean,
+                cookie_file=args.cookie_file,
+            ),
         )
         if (
             args.screenshot_interval is not None
@@ -300,27 +346,25 @@ def main(argv: list[str] | None = None) -> int:
         options = RunOptions(
             input_value=args.input or "",
             output_dir=output_directory(settings),
-            style=args.style,
-            effort=args.effort,
+            style=settings.note.style,
+            effort=settings.note.effort,
             transcript_only=args.transcript_only,
-            save_transcript=args.save_transcript,
-            prefer_subtitles=not args.no_subtitles,
+            save_transcript=settings.run.save_transcript,
+            prefer_subtitles=settings.run.prefer_subtitles,
             pages=args.pages or (),
             from_transcript=(
                 Path(args.from_transcript).expanduser()
                 if args.from_transcript
                 else None
             ),
-            reuse=args.reuse,
-            clean_media=args.clean,
+            reuse=settings.run.reuse,
+            clean_media=settings.run.clean,
             screenshots=settings.screenshots.enabled,
             screenshot_interval=settings.screenshots.interval,
-            write_markdown_text=write_markdown_text,
-            write_markdown_images=write_markdown_images,
-            write_html=write_html,
+            output_formats=settings.output.formats,
             cookie_file=(
-                Path(args.cookie_file).expanduser()
-                if args.cookie_file
+                Path(settings.bilibili.cookie_file).expanduser()
+                if settings.bilibili.cookie_file
                 else None
             ),
         )

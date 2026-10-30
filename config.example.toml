@@ -1,5 +1,6 @@
 # video-note config. The installed copy lives at ~/.config/video-note/config.toml.
 # Environment variables override this file; CLI flags override both.
+# 留空的项表示「用默认」；命令行同名参数会盖过这里的值。
 
 [llm]
 # deepseek / openai / openai_gpt4 / openai_gpt35 / qwen / glm / moonshot /
@@ -36,11 +37,38 @@ device = "cpu"
 sessdata = ""
 bili_jct = ""
 buvid3 = ""
+# 浏览器导出的 Netscape cookies.txt 路径（留空就不用）。命令行 --cookie-file
+# 会盖过这里；文件里的字段比上面手写的值优先。
+cookie_file = ""
+
+[note]
+# 笔记风格：detailed 详细+点评 / faithful 忠实复原 / concise 精简。
+# 命令行 --style 可临时换一种。
+style = "detailed"
+# 模型推理强度：auto / off / high / max（max 按 high 处理）。
+# auto 会按视频长短自动选档，长视频逐段直写时关思考。
+effort = "auto"
+
+[run]
+# 复用同一输入的已有转录；写 false 就是每次都重新转写。命令行 --reuse/--no-reuse 覆盖。
+reuse = true
+# 生成笔记时是否顺带把转录稿写进本次运行的目录。命令行 --save-transcript 覆盖。
+save_transcript = false
+# 是否优先用平台字幕；写 false 就是强制本地语音转写。
+# 命令行 --subtitles/--no-subtitles 覆盖。
+prefer_subtitles = true
+# 跑完是否删掉缓存里的音频、预览视频与旧版截图缓存（只留转录）。
+# 命令行 --clean/--no-clean 覆盖。
+clean = false
 
 [output]
 # 产物的根目录；VIDEO_NOTE_OUTPUT_DIR 和 --out 会覆盖这里。
 # 每次运行在它下面建一个 <标题>_<开始提取时间>/ 目录，产物全在里面。
 dir = "~/notes/video"
+# 这次要写哪几件成品：md-noimage 纯文字 Markdown / md-image 带插图的 Markdown /
+# html 单文件 HTML。命令行点名任一成品开关就整份替换这份清单；
+# 一个都不点名时用这里。环境变量：VIDEO_NOTE_OUTPUT_FORMATS（逗号分隔）。
+formats = ["md-noimage", "html"]
 
 [screenshots]
 # 抽帧并把画面按内容插进笔记正文。需要支持视觉（图片输入）的模型；

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,22 @@ from .llm_summarizer import normalize_provider
 
 APP_NAME = "video-note"
 DEFAULT_OUTPUT_DIR = "~/notes/video"
+
+# 笔记风格与推理强度的可选取值：命令行 --style/--effort 与配置 [note] 共用同一份。
+NOTE_STYLES = ("detailed", "faithful", "concise")
+NOTE_EFFORTS = ("auto", "off", "high", "max")
+
+# 成品格式的名字沿用命令行开关（--md-noimage / --md-image / --html），
+# 配置 [output] formats 与环境变量都用这套名字。
+OUTPUT_FORMAT_MARKDOWN_TEXT = "md-noimage"
+OUTPUT_FORMAT_MARKDOWN_IMAGES = "md-image"
+OUTPUT_FORMAT_HTML = "html"
+OUTPUT_FORMATS = (
+    OUTPUT_FORMAT_MARKDOWN_TEXT,
+    OUTPUT_FORMAT_MARKDOWN_IMAGES,
+    OUTPUT_FORMAT_HTML,
+)
+DEFAULT_OUTPUT_FORMATS = (OUTPUT_FORMAT_MARKDOWN_TEXT, OUTPUT_FORMAT_HTML)
 
 # 每个 provider 惯用的环境变量名。程序不会自己去找它们——要用就在配置里写
 # api_key_env = "provider"（跟着 provider 换）或 api_key_env = "变量名"。
@@ -60,11 +77,13 @@ class BilibiliSettings:
     buvid4: str = ""
     b_nut: str = ""
     b_lsid: str = ""
+    cookie_file: str = ""
 
 
 @dataclass(frozen=True)
 class OutputSettings:
     directory: str = DEFAULT_OUTPUT_DIR
+    formats: tuple[str, ...] = DEFAULT_OUTPUT_FORMATS
 
 
 @dataclass(frozen=True)
@@ -74,12 +93,32 @@ class ScreenshotSettings:
 
 
 @dataclass(frozen=True)
+class NoteSettings:
+    """笔记本身的偏好：写多细、思考多少。"""
+
+    style: str = "detailed"
+    effort: str = "auto"
+
+
+@dataclass(frozen=True)
+class RunSettings:
+    """一次运行怎么做：复用旧稿、存转录稿、用哪种字幕、要不要清缓存。"""
+
+    reuse: bool = True
+    save_transcript: bool = False
+    prefer_subtitles: bool = True
+    clean: bool = False
+
+
+@dataclass(frozen=True)
 class UserSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     asr: ASRSettings = field(default_factory=ASRSettings)
     bilibili: BilibiliSettings = field(default_factory=BilibiliSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     screenshots: ScreenshotSettings = field(default_factory=ScreenshotSettings)
+    note: NoteSettings = field(default_factory=NoteSettings)
+    run: RunSettings = field(default_factory=RunSettings)
 
 
 def user_config_path() -> Path:
@@ -95,6 +134,8 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
     bilibili = _bilibili_settings(_section(data, "bilibili"))
     output = _output_settings(_section(data, "output"))
     screenshots = _screenshot_settings(_section(data, "screenshots"))
+    note = _note_settings(_section(data, "note"))
+    run = _run_settings(_section(data, "run"))
 
     if provider := _env("VIDEO_NOTE_PROVIDER"):
         llm = replace(llm, provider=provider)
@@ -120,10 +161,20 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
 
     if output_dir := _env("VIDEO_NOTE_OUTPUT_DIR"):
         output = replace(output, directory=output_dir)
+    if formats := _env("VIDEO_NOTE_OUTPUT_FORMATS"):
+        output = replace(
+            output,
+            formats=_parse_output_formats(
+                formats.split(","), "环境变量 VIDEO_NOTE_OUTPUT_FORMATS"
+            ),
+        )
 
     if screenshots_enabled := _env("VIDEO_NOTE_SCREENSHOTS"):
         screenshots = replace(
-            screenshots, enabled=_parse_bool(screenshots_enabled)
+            screenshots,
+            enabled=_parse_bool(
+                screenshots_enabled, "环境变量 VIDEO_NOTE_SCREENSHOTS"
+            ),
         )
     if screenshot_interval := _env("VIDEO_NOTE_SCREENSHOT_INTERVAL"):
         screenshots = replace(
@@ -131,85 +182,200 @@ def load_user_settings(path: Path | None = None) -> UserSettings:
             interval=_parse_int(screenshot_interval, screenshots.interval),
         )
 
+    if style := _env("VIDEO_NOTE_STYLE"):
+        note = replace(
+            note,
+            style=_validate_choice(
+                style, NOTE_STYLES, "环境变量 VIDEO_NOTE_STYLE"
+            ),
+        )
+    if effort := _env("VIDEO_NOTE_EFFORT"):
+        note = replace(
+            note,
+            effort=_validate_choice(
+                effort, NOTE_EFFORTS, "环境变量 VIDEO_NOTE_EFFORT"
+            ),
+        )
+
+    if reuse := _env("VIDEO_NOTE_REUSE"):
+        run = replace(run, reuse=_parse_bool(reuse, "环境变量 VIDEO_NOTE_REUSE"))
+    if save_transcript := _env("VIDEO_NOTE_SAVE_TRANSCRIPT"):
+        run = replace(
+            run,
+            save_transcript=_parse_bool(
+                save_transcript, "环境变量 VIDEO_NOTE_SAVE_TRANSCRIPT"
+            ),
+        )
+    if prefer_subtitles := _env("VIDEO_NOTE_PREFER_SUBTITLES"):
+        run = replace(
+            run,
+            prefer_subtitles=_parse_bool(
+                prefer_subtitles, "环境变量 VIDEO_NOTE_PREFER_SUBTITLES"
+            ),
+        )
+    if clean := _env("VIDEO_NOTE_CLEAN"):
+        run = replace(run, clean=_parse_bool(clean, "环境变量 VIDEO_NOTE_CLEAN"))
+
+    if cookie_file := _env("VIDEO_NOTE_COOKIE_FILE"):
+        bilibili = replace(bilibili, cookie_file=cookie_file)
+
     return UserSettings(
         llm=llm,
         asr=asr,
         bilibili=bilibili,
         output=output,
         screenshots=screenshots,
+        note=note,
+        run=run,
     )
 
 
+@dataclass(frozen=True)
+class CliOverrides:
+    """命令行显式给出的值。
+
+    每个字段都是 None / 空元组时表示「这次命令行没说」，由配置和环境变量决定；
+    给了值就盖过配置。``output_formats`` 是空元组时同样表示命令行没点名成品，
+    这时用配置 [output] formats 里的清单。
+    """
+
+    provider: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    api_key_env: str | None = None
+    token_plan_key: str | None = None
+    token_plan_key_env: str | None = None
+    asr_model: str | None = None
+    device: str | None = None
+    output_dir: str | None = None
+    output_formats: tuple[str, ...] = ()
+    screenshots: bool | None = None
+    screenshot_interval: int | None = None
+    note_style: str | None = None
+    note_effort: str | None = None
+    reuse: bool | None = None
+    save_transcript: bool | None = None
+    prefer_subtitles: bool | None = None
+    clean: bool | None = None
+    cookie_file: str | None = None
+
+
 def apply_cli_overrides(
-    settings: UserSettings,
-    *,
-    provider: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
-    api_key: str | None = None,
-    api_key_env: str | None = None,
-    token_plan_key: str | None = None,
-    token_plan_key_env: str | None = None,
-    asr_model: str | None = None,
-    device: str | None = None,
-    output_dir: str | None = None,
-    screenshots: bool | None = None,
-    screenshot_interval: int | None = None,
+    settings: UserSettings, overrides: CliOverrides
 ) -> UserSettings:
     """Apply explicit command-line values on top of config and environment."""
     source = settings.llm.api_key_source
-    if api_key is not None:
+    if overrides.api_key is not None:
         source = "命令行 --api-key"
-    elif token_plan_key is not None:
+    elif overrides.token_plan_key is not None:
         source = "命令行 --token-plan-key"
     llm = replace(
         settings.llm,
-        provider=provider or settings.llm.provider,
-        base_url=base_url if base_url is not None else settings.llm.base_url,
-        model=model if model is not None else settings.llm.model,
-        api_key=api_key if api_key is not None else settings.llm.api_key,
+        provider=overrides.provider or settings.llm.provider,
+        base_url=(
+            overrides.base_url
+            if overrides.base_url is not None
+            else settings.llm.base_url
+        ),
+        model=(
+            overrides.model if overrides.model is not None else settings.llm.model
+        ),
+        api_key=(
+            overrides.api_key
+            if overrides.api_key is not None
+            else settings.llm.api_key
+        ),
         api_key_env=(
-            api_key_env if api_key_env is not None else settings.llm.api_key_env
+            overrides.api_key_env
+            if overrides.api_key_env is not None
+            else settings.llm.api_key_env
         ),
         token_plan_key=(
-            token_plan_key
-            if token_plan_key is not None
+            overrides.token_plan_key
+            if overrides.token_plan_key is not None
             else settings.llm.token_plan_key
         ),
         token_plan_key_env=(
-            token_plan_key_env
-            if token_plan_key_env is not None
+            overrides.token_plan_key_env
+            if overrides.token_plan_key_env is not None
             else settings.llm.token_plan_key_env
         ),
         api_key_source=source,
     )
     asr = replace(
         settings.asr,
-        model=asr_model or settings.asr.model,
-        device=device or settings.asr.device,
+        model=overrides.asr_model or settings.asr.model,
+        device=overrides.device or settings.asr.device,
     )
     output = replace(
-        settings.output, directory=output_dir or settings.output.directory
+        settings.output,
+        directory=overrides.output_dir or settings.output.directory,
+        # 命令行点名了成品就整份替换配置里的清单：一个都没点名才用配置的。
+        formats=overrides.output_formats or settings.output.formats,
     )
     screenshot_settings = replace(
         settings.screenshots,
         enabled=(
             settings.screenshots.enabled
-            if screenshots is None
-            else screenshots
+            if overrides.screenshots is None
+            else overrides.screenshots
         ),
         interval=(
             settings.screenshots.interval
-            if screenshot_interval is None
-            else screenshot_interval
+            if overrides.screenshot_interval is None
+            else overrides.screenshot_interval
+        ),
+    )
+    note = replace(
+        settings.note,
+        style=(
+            overrides.note_style
+            if overrides.note_style is not None
+            else settings.note.style
+        ),
+        effort=(
+            overrides.note_effort
+            if overrides.note_effort is not None
+            else settings.note.effort
+        ),
+    )
+    run = replace(
+        settings.run,
+        reuse=(
+            settings.run.reuse if overrides.reuse is None else overrides.reuse
+        ),
+        save_transcript=(
+            settings.run.save_transcript
+            if overrides.save_transcript is None
+            else overrides.save_transcript
+        ),
+        prefer_subtitles=(
+            settings.run.prefer_subtitles
+            if overrides.prefer_subtitles is None
+            else overrides.prefer_subtitles
+        ),
+        clean=(
+            settings.run.clean if overrides.clean is None else overrides.clean
+        ),
+    )
+    bilibili = replace(
+        settings.bilibili,
+        cookie_file=(
+            overrides.cookie_file
+            if overrides.cookie_file is not None
+            else settings.bilibili.cookie_file
         ),
     )
     return replace(
         settings,
         llm=llm,
         asr=asr,
+        bilibili=bilibili,
         output=output,
         screenshots=screenshot_settings,
+        note=note,
+        run=run,
     )
 
 
@@ -283,30 +449,122 @@ def _bilibili_settings(section: dict[str, Any]) -> BilibiliSettings:
         buvid4=_text(section, "buvid4"),
         b_nut=_text(section, "b_nut"),
         b_lsid=_text(section, "b_lsid"),
+        cookie_file=_text(section, "cookie_file"),
     )
 
 
 def _output_settings(section: dict[str, Any]) -> OutputSettings:
     return OutputSettings(
-        directory=_text(section, "dir", DEFAULT_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR
+        directory=_text(section, "dir", DEFAULT_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR,
+        formats=_output_formats(section),
     )
 
 
 def _screenshot_settings(section: dict[str, Any]) -> ScreenshotSettings:
-    enabled_value = section.get("enabled", True)
-    enabled = (
-        enabled_value
-        if isinstance(enabled_value, bool)
-        else _parse_bool(str(enabled_value))
-    )
     return ScreenshotSettings(
-        enabled=enabled,
+        enabled=_config_bool(
+            section, "enabled", True, "配置文件 [screenshots] enabled"
+        ),
         interval=_parse_int(section.get("interval", 30), 30),
     )
 
 
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+def _note_settings(section: dict[str, Any]) -> NoteSettings:
+    return NoteSettings(
+        style=_validate_choice(
+            _text(section, "style", "detailed") or "detailed",
+            NOTE_STYLES,
+            "配置文件 [note] style",
+        ),
+        effort=_validate_choice(
+            _text(section, "effort", "auto") or "auto",
+            NOTE_EFFORTS,
+            "配置文件 [note] effort",
+        ),
+    )
+
+
+def _run_settings(section: dict[str, Any]) -> RunSettings:
+    return RunSettings(
+        reuse=_config_bool(section, "reuse", True, "配置文件 [run] reuse"),
+        save_transcript=_config_bool(
+            section,
+            "save_transcript",
+            False,
+            "配置文件 [run] save_transcript",
+        ),
+        prefer_subtitles=_config_bool(
+            section,
+            "prefer_subtitles",
+            True,
+            "配置文件 [run] prefer_subtitles",
+        ),
+        clean=_config_bool(section, "clean", False, "配置文件 [run] clean"),
+    )
+
+
+def _output_formats(section: dict[str, Any]) -> tuple[str, ...]:
+    """配置 [output] formats：留空或没写就用默认的两种成品。"""
+    value = section.get("formats")
+    if value is None:
+        return DEFAULT_OUTPUT_FORMATS
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = [str(item) for item in value]
+    else:
+        raise ValueError(
+            "配置文件 [output] formats 必须是字符串列表，"
+            f"可选 {' / '.join(OUTPUT_FORMATS)}"
+        )
+    names = tuple(item.strip() for item in items if item.strip())
+    if not names:
+        return DEFAULT_OUTPUT_FORMATS
+    return _parse_output_formats(names, "配置文件 [output] formats")
+
+
+def _parse_output_formats(
+    names: Sequence[str], source: str
+) -> tuple[str, ...]:
+    """成品格式名归一：去重、按固定顺序排列，认不出来的直接报错。"""
+    unknown = [name for name in names if name not in OUTPUT_FORMATS]
+    if unknown:
+        raise ValueError(
+            f"{source} 不支持 {', '.join(unknown)}；"
+            f"可选 {' / '.join(OUTPUT_FORMATS)}"
+        )
+    return tuple(name for name in OUTPUT_FORMATS if name in names)
+
+
+def _validate_choice(value: str, allowed: Sequence[str], source: str) -> str:
+    """取值必须落在白名单里，否则当场报错（说清楚是哪个配置项写错了）。"""
+    if value not in allowed:
+        raise ValueError(
+            f"{source} 只支持 {' / '.join(allowed)}，当前为 {value!r}"
+        )
+    return value
+
+
+def _config_bool(
+    section: dict[str, Any], key: str, default: bool, source: str
+) -> bool:
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return _parse_bool(str(value), source)
+
+
+def _parse_bool(value: str, source: str) -> bool:
+    """把 true/false（也认 1/0、yes/no、on/off）解析成布尔值。"""
+    text = value.strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    raise ValueError(
+        f"{source} 只接受 true/false（也认 1/0、yes/no、on/off），"
+        f"当前为 {value!r}"
+    )
 
 
 def _parse_int(value: Any, default: int) -> int:

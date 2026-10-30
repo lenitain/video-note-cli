@@ -76,6 +76,9 @@ video-note 'https://www.bilibili.com/video/BVxxxx'
 
 产物默认写到 `~/notes/video`，每次运行一个目录 `视频_20251030-143012/`：里面是 `视频.html`（图文，单文件）、`视频.md`（纯文字）、`视频.frames/`（截图）、`视频.transcript.*`（转录稿）。
 
+配置里还能固定这些长期偏好：笔记风格与推理强度（`[note]`）、复用与清缓存（`[run]`）、出哪几件成品（`[output] formats`）、
+B 站 cookies.txt 路径（`[bilibili] cookie_file`）。命令行同名参数临时盖过它们。
+
 完整参数、配置项、产物布局与故障排查见 **[SPEC.md](SPEC.md)**。
 
 ## 文档
