@@ -70,6 +70,7 @@ from .video_processor import (
     VideoProcessor,
     VideoSource,
     bilibili_page_url,
+    canonical_bilibili_url,
     merge_bilibili_pages,
     normalize_video_input,
 )
@@ -476,7 +477,7 @@ async def _resolve_input(
         expanded = video_processor.resolve_bilibili_short_url(normalized)
         if expanded != normalized:
             log(f"展开短链：{expanded}")
-        normalized = video_processor.canonical_bilibili_url(expanded)
+        normalized = canonical_bilibili_url(expanded)
 
     log(f"读取视频信息：{normalized}")
     try:
