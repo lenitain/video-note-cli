@@ -159,20 +159,43 @@ _AV_RE = re.compile(r"av(\d+)", re.I)
 _TRAILING_PUNCT = ".,;:!?。，；：！？、）】」』”"
 
 
+def canonical_bilibili_url(url: str) -> str:
+    """把 B 站视频页链接收敛成 https://www.bilibili.com/video/<BV|av>。
+
+    分享链接通常带 spm_id_from、vd_source、share_source 等追踪参数，只保留
+    分 P 选择用的 ?p=N，同一视频的不同分享链接才会落到同一个缓存键上。
+    解析不出 BV/av 号（短链、合集页等）时原样返回。
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
+        return url
+    bv = _BV_RE.search(parsed.path)
+    av = None if bv else _AV_RE.search(parsed.path)
+    if not bv and not av:
+        return url
+    video_id = bv.group(0) if bv else f"av{av.group(1)}"
+    page = _page_requested(url)
+    query = urlencode({"p": page}) if page > 0 else ""
+    return urlunsplit(("https", "www.bilibili.com", f"/video/{video_id}", query, ""))
+
+
 def normalize_video_input(value: str) -> str | None:
-    """宽松识别视频输入：完整 http(s) 链接原样返回；否则从分享文本中提取
-    B 站或抖音链接（可缺省 scheme），或裸 BV/av 号补全为视频页 URL。
-    无法识别时返回 None。"""
+    """宽松识别视频输入：B 站链接收敛成视频页 URL，其他完整 http(s) 链接原样
+    返回；否则从分享文本中提取 B 站或抖音链接（可缺省 scheme），或裸 BV/av
+    号补全为视频页 URL。无法识别时返回 None。"""
     text = (value or "").strip()
     if not text:
         return None
     parsed = urlparse(text)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return text
+        return canonical_bilibili_url(text)
     match = _EMBEDDED_LINK_RE.search(text)
     if match:
         link = match.group(0).rstrip(_TRAILING_PUNCT + "/")
-        return link if link.startswith(("http://", "https://")) else f"https://{link}"
+        if not link.startswith(("http://", "https://")):
+            link = f"https://{link}"
+        return canonical_bilibili_url(link)
     bv = _BV_RE.search(text)
     if bv:
         return f"https://www.bilibili.com/video/{bv.group(0)}"

@@ -40,6 +40,10 @@ video-note [输入] [选项]
 | `./lecture.srt` | 字幕文件（`.srt` / `.vtt` / `.json3`），跳过下载与转写 |
 | `--from-transcript ./lecture.transcript.json` | 从已有转录稿（`.json` / `.srt` / `.vtt` / `.md` / `.txt`）开始 |
 
+B 站分享链接里的追踪参数（`spm_id_from`、`vd_source`、`share_source` 等）会被丢弃，
+链接收敛成 `https://www.bilibili.com/video/<BV|av>`，只保留 `?p=`；同一个视频换一种分享链接
+照样命中同一份转录缓存。
+
 ### 2.3 例子
 
 ```bash

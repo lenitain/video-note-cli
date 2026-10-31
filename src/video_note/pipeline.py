@@ -473,10 +473,10 @@ async def _resolve_input(
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
     if source_kind == VideoSource.BILIBILI:
-        resolved_url = video_processor.resolve_bilibili_short_url(normalized)
-        if resolved_url and resolved_url != normalized:
-            log(f"展开短链：{resolved_url}")
-            normalized = resolved_url
+        expanded = video_processor.resolve_bilibili_short_url(normalized)
+        if expanded != normalized:
+            log(f"展开短链：{expanded}")
+        normalized = video_processor.canonical_bilibili_url(expanded)
 
     log(f"读取视频信息：{normalized}")
     try:
