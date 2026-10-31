@@ -85,7 +85,7 @@ uv run python -m video_note --help
 ruff check src && ruff format src   # 静态检查与格式化（ruff 未列入依赖，需自行安装）
 ```
 
-包目录是 `src/video_note/`，入口点是 `video-note`，构建后端是 hatchling。
+包目录是 `src/video_note/`，入口点是 `video-note`，构建后端是 uv_build。
 
 源码结构：
 
