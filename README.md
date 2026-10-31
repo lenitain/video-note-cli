@@ -22,44 +22,29 @@
 
 - Python 3.11+（项目固定使用 3.12，见 `.python-version`）
 - [ffmpeg](https://ffmpeg.org/)（在 PATH 里）
-- [uv](https://github.com/astral-sh/uv)（推荐）
+- [uv](https://github.com/astral-sh/uv)
 
 ## 安装
 
 ```bash
 git clone git@github.com:lenitain/video-note-cli
 cd video-note-cli
-uv sync
+uv tool install .
 ```
 
-安装后可以直接跑：
-
-```bash
-uv run video-note --help
-```
-
-想在任何目录都用 `video-note`，把虚拟环境里的入口软链到 PATH：
-
-```bash
-cd <项目目录>              # 例如 ~/video-note-cli
-mkdir -p ~/.local/bin
-ln -sf "$PWD/.venv/bin/video-note" ~/.local/bin/video-note
-```
-
-确认 `~/.local/bin` 在 `PATH` 里后，就可以：
+装好后 `video-note` 就在 `PATH` 上（默认 `~/.local/bin`），任何目录都能直接用：
 
 ```bash
 video-note --version
 ```
 
-## 构建
+不想安装，在 checkout 里直接跑：
 
 ```bash
-uv build          # 产物在 dist/：sdist + wheel
-uv tool install dist/video_note_cli-*.whl   # 装成全局命令
+uv run video-note --help
 ```
 
-`pyproject.toml` 用 hatchling 构建，包目录是 `src/video_note/`，入口点是 `video-note`。
+卸载：`uv tool uninstall video-note-cli`。
 
 ## 快速开始
 
@@ -97,9 +82,10 @@ B 站 cookies.txt 路径（`[bilibili] cookie_file`）。命令行同名参数�
 uv sync                        # 安装依赖
 uv run video-note --help       # 运行
 uv run python -m video_note --help
-uv build                       # 构建产物
 ruff check src && ruff format src   # 静态检查与格式化（ruff 未列入依赖，需自行安装）
 ```
+
+包目录是 `src/video_note/`，入口点是 `video-note`，构建后端是 hatchling。
 
 源码结构：
 
