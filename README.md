@@ -49,15 +49,15 @@ uv run video-note --help
 ## 快速开始
 
 ```bash
-# 1. 配置模型（默认 DeepSeek；Key 建议走环境变量）
+# 配置模型（默认 DeepSeek；Key 建议走环境变量）
 mkdir -p ~/.config/video-note
 cp config.example.toml ~/.config/video-note/config.toml
 $EDITOR ~/.config/video-note/config.toml
 
-# 2. 只要转录稿，不需要 API Key
+# 如果只要转录稿（不需要 API Key）
 video-note 'https://www.bilibili.com/video/BVxxxx' --transcript-only
 
-# 3. 生成图文笔记
+# 生成图文笔记（需要 API Key）
 video-note 'https://www.bilibili.com/video/BVxxxx'
 ```
 
