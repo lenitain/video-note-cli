@@ -794,18 +794,23 @@ async def _download_audio(
         log(f"复用已下载音频：{cached.name}")
         return cached
     log(f"下载音频：{url}")
+    notes: list[str] = []
     try:
-        return await video_processor.download_audio(
+        path = await video_processor.download_audio(
             url,
             run_key,
             cookies,
             media_name=media_name,
             should_abort=cancel.is_set,
+            notes=notes,
         )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         raise PipelineError(_friendly_download_error(exc, url)) from exc
+    for note in notes:
+        log(redact_secrets(note))
+    return path
 
 
 def _asr_source_from_result(result: dict[str, Any]) -> str:
@@ -1342,12 +1347,14 @@ async def _download_preview_video(
         log(f"复用已下载预览视频：{cached.name}")
         return cached
     log(f"下载低清预览视频（用于抽帧）：{media_name}")
+    notes: list[str] = []
     try:
-        return await video_processor.download_preview_video(
+        path = await video_processor.download_preview_video(
             url,
             run_key,
             cookies,
             should_abort=cancel.is_set,
+            notes=notes,
             media_name=media_name,
         )
     except asyncio.CancelledError:
@@ -1356,6 +1363,9 @@ async def _download_preview_video(
         raise PipelineError(
             f"下载预览视频失败：{redact_secrets(str(exc))}"
         ) from exc
+    for note in notes:
+        log(redact_secrets(note))
+    return path
 
 
 def _clean_run_cache(

@@ -16,6 +16,7 @@ import asyncio
 import os
 import threading
 import time
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -123,23 +124,41 @@ class ParaformerTranscriber:
         directory.mkdir(parents=True, exist_ok=True)
         last_error: Exception | None = None
         endpoint = os.environ.get("HF_ENDPOINT", HF_ENDPOINT).rstrip("/")
+        endpoints = [endpoint]
+        # 镜像证书或代理链路异常时，官方源通常仍可用。仅对默认镜像追加，
+        # 不改变用户通过 HF_ENDPOINT 指定的其他自建 endpoint。
+        if endpoint == HF_ENDPOINT:
+            endpoints.append("https://huggingface.co")
         for filename in spec["files"]:
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError("任务已取消")
             target = directory / filename
             if self._file_complete(target):
                 continue
-            url = f"{endpoint}/{spec['repo']}/resolve/main/{filename}"
-            ok, error = download_to_file(url, target, HEADERS, cancel_event)
-            if not ok:
+            downloaded = False
+            for candidate in endpoints:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("任务已取消")
+                url = f"{candidate}/{spec['repo']}/resolve/main/{filename}"
+                ok, error = download_to_file(url, target, HEADERS, cancel_event)
+                if ok:
+                    downloaded = True
+                    last_error = None
+                    break
                 last_error = error
+                # 404 是确定性结果：换镜像也一样没有，直接换下一个文件更没意义
+                if isinstance(error, urllib.error.HTTPError) and error.code == 404:
+                    break
+            if not downloaded:
+                raise RuntimeError(
+                    f"Paraformer {component} 模型下载失败：{last_error}。"
+                    f"已尝试 {'、'.join(endpoints)}，请检查网络/代理"
+                    "或通过 HF_ENDPOINT 指定可用镜像。"
+                )
         if any(
             not self._file_complete(directory / name) for name in MODEL_SPECS[component]["files"]
         ):
-            raise RuntimeError(
-                f"Paraformer {component} 模型下载失败：{last_error}。"
-                f"当前下载源 {endpoint}，请检查网络/代理或通过 HF_ENDPOINT 指定可用镜像。"
-            )
+            raise RuntimeError(f"Paraformer {component} 模型文件不完整，请检查网络后重试。")
         return directory
 
     def _ensure_models(self, cancel_event: threading.Event | None) -> dict[str, Any]:

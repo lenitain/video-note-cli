@@ -19,8 +19,8 @@ def download_to_file(
     target: Path,
     headers: dict[str, str],
     cancel_event: threading.Event | None = None,
-    attempts: int = 3,
-    timeout: int = 60,
+    attempts: int = 4,
+    timeout: int = 90,
 ) -> tuple[bool, Exception | None]:
     """下载 url 到 target。返回 (是否成功, 最后一次错误)；成功时错误为 None。"""
     part = target.with_suffix(target.suffix + ".part")
@@ -71,5 +71,8 @@ def download_to_file(
             if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
                 # 仓库里没有这个文件：重试只会白等，立刻返回让调用方换名或换源
                 return False, exc
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 416:
+                # 断点比服务端文件还长（上次拿到了另一个 revision）：丢掉重下
+                part.unlink(missing_ok=True)
             time.sleep(1.5 * (attempt + 1))
     return False, last_error
