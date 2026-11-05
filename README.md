@@ -4,7 +4,7 @@
 
 只保留「取字幕 / 本地转写 → 视觉大模型看图写笔记」功能。
 
-核心代码取自 [VideoToNo](https://github.com/like-attract/video-to-note)（MIT），去掉了 FastAPI、MCP、托盘、扫码登录、HTML/PNG 导出和密钥加密，改成适合终端与脚本调用的形式。
+核心代码取自 [VideoToNo](https://github.com/like-attract/video-to-note)（MIT），去掉了 FastAPI、MCP、托盘、扫码登录、PNG 导出和密钥加密，改成适合终端与脚本调用的形式。
 
 ## 能做什么
 
@@ -16,7 +16,7 @@
 - 复用：同一输入重复运行会复用已缓存的转录；也可以直接从已有转录稿重新生成笔记。
 - 无需 Key：`--transcript-only` 只取字幕/转写，全程不调用大模型。
 
-不包含：Web UI、HTTP API、MCP、任务队列、托盘通知、自动更新、HTML/PNG 导出、扫码登录、密钥加密。
+不包含：Web UI、HTTP API、MCP、任务队列、托盘通知、自动更新、PNG 导出、扫码登录、密钥加密。
 
 ## 环境要求
 

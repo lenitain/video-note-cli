@@ -544,4 +544,4 @@ video-note 'URL' --transcript-only
 ## 10. 不做什么
 
 没有 Web 界面、没有服务端、没有打包分发：不包含 Web UI、HTTP API、MCP、任务队列、托盘通知、自动更新、
-HTML/PNG 导出、扫码登录、密钥加密。
+PNG 导出、扫码登录、密钥加密。
