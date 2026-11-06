@@ -82,10 +82,13 @@ B 站 cookies.txt 路径（`[bilibili] cookie_file`）。命令行同名参数�
 uv sync                        # 安装依赖
 uv run video-note --help       # 运行
 uv run python -m video_note --help
+uv run pytest                  # 测试（不需要网络与 API Key）
 ruff check src && ruff format src   # 静态检查与格式化（ruff 未列入依赖，需自行安装）
 ```
 
 包目录是 `src/video_note/`，入口点是 `video-note`，构建后端是 uv_build。
+
+上游出处与分歧记录在 [UPSTREAM.md](UPSTREAM.md)：`upstream/` 存着固定版本的上游原样副本（只做三方合并的基底，不参与打包），派生模块的每处改写都有自己的编号。改派生模块前先看那份日志；同步上游用 `uv run python scripts/sync-upstream.py --ref <tag>`。`scripts/install-hooks.sh` 会装一个 pre-commit 钩子，要求派生模块的改动与映射表在同一个提交里。
 
 源码结构：
 
@@ -101,7 +104,8 @@ src/video_note/
   screenshots.py       PyAV 逐帧扫描、按画面变化切段、JPEG 输出
   video_frames.py      截图模型（含覆盖区间）、按区间选取、抽稀、视觉接口编码
   web_search.py        联网检索后端（baidu/bing/duckduckgo/tavily），供点评核验
-  transcript.py        时间轴、切块、质量检查（上游代码）
+  transcript.py        时间轴、切块、质量检查（上游代码，逐字一致）
+  timestamps.py        时间戳读回（笔记里的 MM:SS → 秒）
   video_processor.py   下载、平台字幕、B 站 AI 字幕（上游代码）
   whisper_asr.py       faster-whisper 转写（上游代码）
   paraformer_asr.py    Paraformer 转写（上游代码）

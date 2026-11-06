@@ -10,12 +10,12 @@ from contextlib import suppress
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
+from .timestamps import parse_timestamp
 from .transcript import (
     TranscriptSegment,
     chunk_segments,
     format_timestamp,
     merge_segment_lines,
-    parse_timestamp,
     segments_to_prompt,
 )
 from .video_frames import (

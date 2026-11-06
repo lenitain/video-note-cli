@@ -4,7 +4,8 @@ import re
 from datetime import datetime
 from typing import Any, Sequence
 
-from .transcript import format_timestamp, parse_timestamp
+from .timestamps import parse_timestamp
+from .transcript import format_timestamp
 from .video_frames import VideoFrame
 
 SAFE_NAME_LIMIT = 80

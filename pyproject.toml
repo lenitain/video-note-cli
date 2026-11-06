@@ -20,6 +20,10 @@ dependencies = [
 [project.scripts]
 video-note = "video_note.cli:main"
 
+[dependency-groups]
+# 测试跑在本机 venv 里：`uv run pytest`。
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["uv_build>=0.13,<0.14"]
 build-backend = "uv_build"
@@ -30,3 +34,12 @@ default = true
 
 [tool.uv.build-backend]
 module-name = "video_note"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 不装包也能直接跑：源码布局是 src/。
+pythonpath = ["src", "scripts"]
+
+[tool.ruff]
+# upstream/ 是上游原样快照：它的风格不是本仓风格，而且只做三方合并的 base。
+exclude = ["upstream"]
