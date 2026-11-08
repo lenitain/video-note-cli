@@ -7,8 +7,8 @@
 | 项 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/like-attract/video-to-note |
-| 固定版本 | `v1.4.7` |
-| 提交 | `5b99445e402ebd505aa8d13e73ab4476bd09f365` |
+| 固定版本 | `v1.4.8` |
+| 提交 | `4fa35b87fc003b3a6f55a12976b24fc1cfdb2de6` |
 | 快照目录 | `upstream/backend/` |
 
 `upstream/` 保存该提交下派生模块的原样副本。它只读、不参与打包、不参与运行（`uv_build` 只收 `src/video_note`），存在的唯一理由是让下一次同步能跑三方合并：**本仓改动（local）、旧快照（base）、上游新版本（theirs）**。没有 base 的同步只能靠重读几百行 diff 手工判断，`cbb9f21` 那次 413 行的搬运就是这么来的。
@@ -25,12 +25,12 @@
 
 | 本仓文件 | 上游文件 | 状态 | 分歧 | 上游基线 sha256 |
 | --- | --- | --- | --- | --- |
-| `src/video_note/transcript.py` | `backend/transcript.py` | verbatim | — | `f8b6e547a8c5c73ed4256e3a1d9ad78639f4cfded40938a551916edd0d15b916` |
+| `src/video_note/transcript.py` | `backend/transcript.py` | verbatim | — | `6e0292cc2edd6a2373b1882a9fb730679f104c44b061011701937d4617ec348d` |
 | `src/video_note/download.py` | `backend/download.py` | adapted | D1 | `e09ffd57bd64a9768c736fb17a392f80727c31fbf6641708a38e4d05b201c345` |
-| `src/video_note/whisper_asr.py` | `backend/whisper_asr.py` | adapted | D2 | `032109a70773db8fc861aced12d6356eacc1a44213371b021b689ba286d74639` |
-| `src/video_note/paraformer_asr.py` | `backend/paraformer_asr.py` | adapted | D3 | `0e7e29a1cd0dff82354c3a09a8d490b0d9e508a34dc031359d9daa2307824552` |
+| `src/video_note/whisper_asr.py` | `backend/whisper_asr.py` | adapted | D2 | `357661bc154210434bc3480dd8ebceba3f2ad3778985b4e270eda081e6a0c6fb` |
+| `src/video_note/paraformer_asr.py` | `backend/paraformer_asr.py` | adapted | D3 | `71c3feed862658f1bc37277b23123f3e5efbefd3f46393ef1b8e74f25a021683` |
 | `src/video_note/video_processor.py` | `backend/video_processor.py` | adapted | D4 | `a2bf2cac520622369ed1bc0c91832e91fc2e475b31c2f79aa8c3f21196d278ce` |
-| `src/video_note/llm_summarizer.py` | `backend/llm_summarizer.py` | adapted | D5 | `b6136df3fd4fb3b11154d2cdd3c55d3500a03c03e381172a4addc18bcfb996cf` |
+| `src/video_note/llm_summarizer.py` | `backend/llm_summarizer.py` | adapted | D5 | `c9324a6d5924434a82eca6c2920547b37cb09b4943837072ee12fe7d662656f0` |
 | `src/video_note/screenshots.py` | `backend/video_processor.py` | adapted | D6 | `a2bf2cac520622369ed1bc0c91832e91fc2e475b31c2f79aa8c3f21196d278ce` |
 | `src/video_note/timestamps.py` | — | local-only | — | — |
 | `src/video_note/video_frames.py` | — | local-only | — | — |
