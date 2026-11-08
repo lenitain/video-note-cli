@@ -132,6 +132,22 @@ def plan(entries: list[Entry], clone: Path, ref: str, out: Path) -> list[MergeRe
     return results
 
 
+def unresolved(entries: list[Entry]) -> list[str]:
+    """写回 src/ 的合并结果里是否还留着冲突标记。
+
+    冲突是按旧基线算出来的：两边改到同一行时，解决后重跑仍会报冲突，
+    所以 accept 只能看工作区有没有留下标记，不能看合并结果有没有冲突。
+    """
+    leftover: list[str] = []
+    for entry in entries:
+        if not entry.derived:
+            continue
+        text = (ROOT / entry.local).read_text(encoding="utf-8")
+        if "<<<<<<<" in text or ">>>>>>>" in text:
+            leftover.append(entry.local)
+    return leftover
+
+
 def accept(entries: list[Entry], clone: Path, ref: str, commit: str) -> None:
     """把上游新版本写成下一份快照，并更新映射表里的基线与哈希。"""
     for entry in entries:
@@ -220,13 +236,15 @@ def main(argv: list[str]) -> int:
         args.out.mkdir(parents=True)
         results = plan(entries, args.clone, args.ref, args.out)
         pending = report(results, args.out)
-        if args.accept and pending:
-            print(
-                "\n还有未解决的冲突，不能确认新基线：先把合并结果写回 src/ 再跑一次。",
-                file=sys.stderr,
-            )
-            return 1
         if args.accept:
+            leftover = unresolved(entries)
+            if leftover:
+                print(
+                    "\n这些文件还留着冲突标记，不能确认新基线：按标记合并后重跑：\n  "
+                    + "\n  ".join(leftover),
+                    file=sys.stderr,
+                )
+                return 1
             accept(entries, args.clone, args.ref, commit)
             print(
                 f"\n基线已更新：{args.ref} @ {commit}。"
@@ -236,7 +254,7 @@ def main(argv: list[str]) -> int:
     except (RuntimeError, OSError) as error:
         print(f"同步失败：{error}", file=sys.stderr)
         return 1
-    return 1 if pending else 0
+    return 1 if pending and not args.accept else 0
 
 
 if __name__ == "__main__":
