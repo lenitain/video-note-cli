@@ -191,6 +191,7 @@ class AsrRunner:
                 model_name=self.settings.model,
                 use_gpu=self.settings.device == "cuda",
                 cancel_event=self.cancel.event,
+                progress_callback=self._report_progress,
             )
         else:
             if self._whisper is None:
